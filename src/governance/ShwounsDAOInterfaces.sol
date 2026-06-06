@@ -147,12 +147,18 @@ interface ShwounsDAOTypes {
         address proposalEscrowImplementation;
         /// @notice One-shot lock for `proposalEscrowImplementation`.
         bool proposalEscrowImplementationLocked;
+        /// @notice DAO-curated allowlist of fundable ERC-20 assets (M-04). ETH (address(0)) is
+        ///         always fundable and is NOT keyed here. Rebasing/fee-on-transfer tokens can't be
+        ///         detected by interface, so a proposal that requests a non-allowlisted ERC-20 is
+        ///         rejected at queue (paired with exact balance-delta collection + the pre-execution
+        ///         solvency recheck as defense-in-depth).
+        mapping(address => bool) fundableAsset;
         /// @notice Reserved slots for future upgrades. This Storage struct sits at slot 0 of the
         ///         UUPS proxy, FOLLOWED by inherited OpenZeppelin storage — so new fields must be
         ///         appended HERE (consuming the gap), never after `ds`, or they would shift the
         ///         inherited slots. Decrement the gap size by the number of slots you add.
-        ///         Was [50]; -3 for executing(1) + activeProposalId(1) + escrowImpl+lock packed(1).
-        uint256[47] __gap;
+        ///         Was [50]; -4 for executing(1)+activeProposalId(1)+escrowImpl+lock(1)+fundable(1).
+        uint256[46] __gap;
     }
 
     // --------------------------------------------------------------------------

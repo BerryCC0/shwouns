@@ -405,6 +405,21 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
         return ds.activeProposalId;
     }
 
+    event FundableAssetSet(address indexed asset, bool fundable);
+
+    /// @notice DAO-curated allowlist of fundable ERC-20 assets (M-04). A proposal that requests a
+    ///         non-allowlisted ERC-20 is rejected at queue. ETH (address(0)) is always fundable.
+    ///         Governable (admin = DAO, callable from the active escrow).
+    function setFundableAsset(address asset, bool fundable) external onlyAdmin {
+        if (asset == address(0)) revert InvalidAddress(); // ETH is always fundable; don't key it
+        ds.fundableAsset[asset] = fundable;
+        emit FundableAssetSet(asset, fundable);
+    }
+
+    function isFundableAsset(address asset) external view returns (bool) {
+        return asset == address(0) || ds.fundableAsset[asset];
+    }
+
     /// @notice Cast a vote AND get gas refunded by GovernanceRewards (capped at GR's
     ///         maxRefundPerVote). Voters who don't care about gas refunds can use the
     ///         regular castVote().

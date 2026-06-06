@@ -116,6 +116,7 @@ contract AuditFindingsTest is LifecycleInvariantsTest {
     function test_audit_approvalActionDrainsAnotherProposalsERC20() public {
         MockERC20 asset = new MockERC20();
         asset.mint(address(aliceVault), 100 ether);
+        dao.setFundableAsset(address(asset), true); // M-04 allowlist so the victim can queue
 
         address[] memory targets = new address[](1);
         uint256[] memory values = new uint256[](1);

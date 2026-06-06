@@ -448,6 +448,7 @@ contract DAOMultiAssetTest is DAOTestBase {
     function setUp() public {
         _deploy(1, 7200);
         usdc = new MockERC20();
+        dao.setFundableAsset(address(usdc), true); // M-04 allowlist: USDC is a fundable asset
 
         // Fund vaults with USDC
         usdc.mint(address(aliceVault), 100e18);

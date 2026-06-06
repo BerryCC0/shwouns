@@ -19,11 +19,14 @@ import { IShwounsVaultRegistry } from "../vault/IShwounsVaultRegistry.sol";
 import { ShwounsVault } from "../vault/ShwounsVault.sol";
 import { IProposalEscrow } from "./ProposalEscrow.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import { SignatureChecker } from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 import { Clones } from "@openzeppelin/contracts/proxy/Clones.sol";
 
 library ShwounsDAOProposals {
+    using SafeERC20 for IERC20;
+
     /// @dev The 4-byte selector for ERC-20 transfer(address,uint256). Used to detect
     ///      ERC-20 funding requirements in a proposal's calldata.
     bytes4 internal constant ERC20_TRANSFER_SELECTOR = bytes4(keccak256("transfer(address,uint256)"));
@@ -66,6 +69,7 @@ library ShwounsDAOProposals {
     error NotTerminal();
     error EscrowCodehashMismatch();
     error UpgradeMustBeLastAction();
+    error AssetNotFundable();
 
     /// @notice Residual asset kinds for rescueFromEscrow (A8).
     enum AssetKind { ETH, ERC20, ERC721, ERC1155 }
@@ -547,6 +551,10 @@ library ShwounsDAOProposals {
 
             address asset = targets[i];
             if (ss.requestedAmount[asset] == 0) {
+                // M-04 fundable-asset allowlist: only DAO-curated ERC-20s may fund a proposal
+                // (ETH/address(0) is always fundable and handled above). Rejects rebasing/
+                // fee-on-transfer tokens that can't be exactly accounted.
+                if (!ds.fundableAsset[asset]) revert AssetNotFundable();
                 ss.assets.push(asset);
             }
             ss.requestedAmount[asset] += amount;
@@ -707,9 +715,16 @@ library ShwounsDAOProposals {
         if (actual > outstanding) actual = outstanding;
 
         if (actual > 0) {
+            // M-04: credit the ACTUAL amount the escrow received (balance delta), never the
+            // requested pull. For an allowlisted exact-transfer token this equals `actual`; a
+            // fee/rebasing token would credit less, leaving the proposal under-collected so
+            // finalize's solvency check blocks it — rather than overstating collection.
+            uint256 balBefore = asset == address(0) ? escrow.balance : IERC20(asset).balanceOf(escrow);
             ShwounsVault(payable(vault)).pullProRata(proposalId, asset, escrow, actual);
-            ss.collected[asset] += actual; // C4: per-proposal ledger (isolates this proposal's funds)
-            emit AssetCollectedFromVault(proposalId, shwounId, asset, actual);
+            uint256 received =
+                (asset == address(0) ? escrow.balance : IERC20(asset).balanceOf(escrow)) - balBefore;
+            ss.collected[asset] += received; // C4: per-proposal ledger (isolates this proposal's funds)
+            emit AssetCollectedFromVault(proposalId, shwounId, asset, received);
         }
     }
 
@@ -852,18 +867,26 @@ library ShwounsDAOProposals {
         if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Collected) revert InvalidProposalState();
         ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
         if (amount == 0 || ss.requestedAmount[asset] == 0) revert InvalidTopUp();
+        // L-02: cap at the outstanding shortfall — reject excess so over-funding can't be stranded.
+        uint256 outstanding = ss.requestedAmount[asset] > ss.collected[asset]
+            ? ss.requestedAmount[asset] - ss.collected[asset]
+            : 0;
+        if (amount > outstanding) revert InvalidTopUp();
 
-        // Route the top-up into the proposal's escrow (per-proposal custody), not the shared facade.
+        // Route into the proposal's escrow (per-proposal custody) and credit the ACTUAL delta (M-04).
         address escrow = escrowAddressOf(ds, proposalId);
         if (asset == address(0)) {
             if (msg.value != amount) revert InvalidTopUp();
+            uint256 balBefore = escrow.balance;
             (bool ok, ) = escrow.call{ value: amount }("");
             if (!ok) revert InvalidTopUp();
+            ss.collected[asset] += escrow.balance - balBefore;
         } else {
             if (msg.value != 0) revert InvalidTopUp();
-            IERC20(asset).transferFrom(msg.sender, escrow, amount);
+            uint256 balBefore = IERC20(asset).balanceOf(escrow);
+            IERC20(asset).safeTransferFrom(msg.sender, escrow, amount);
+            ss.collected[asset] += IERC20(asset).balanceOf(escrow) - balBefore;
         }
-        ss.collected[asset] += amount;
         emit ProposalToppedUp(proposalId, asset, amount);
     }
 
