@@ -60,6 +60,11 @@ library ShwounsDAOProposals {
     error OnlyAgainstVotesDuringObjection();
     error AlreadyExecuting();
     error EscrowImplNotSet();
+    error NotTerminal();
+    error EscrowCodehashMismatch();
+
+    /// @notice Residual asset kinds for rescueFromEscrow (A8).
+    enum AssetKind { ETH, ERC20, ERC721, ERC1155 }
 
     // -------------------------------------------------------------------------
     // Re-emit events to enable indexer simplicity (library events bubble up)
@@ -1246,6 +1251,53 @@ library ShwounsDAOProposals {
             distributed += share;
         }
         ss.collected[asset] = 0; // drained — prevent any double refund
+    }
+
+    // =========================================================================
+    // Residual recovery — permissionless, strictly terminal-gated (A8)
+    // =========================================================================
+
+    event EscrowResidualRescued(
+        uint256 indexed proposalId, uint8 kind, address indexed asset, uint256 tokenId, uint256 amount
+    );
+
+    /// @notice Recover stray residual assets left in a proposal's escrow, sending them to the
+    ///         immutable GovernanceRewards sink. Permissionless but STRICTLY terminal-gated: only
+    ///         after the proposal has reached a terminal state (Executed — committed by a successful
+    ///         finalize OR by the refund path), and never while any execution is in flight. Before
+    ///         terminal the escrow holds live proposal funding awaiting execution/refund, so
+    ///         permissionless rescue is barred (it would be fund theft); during execution the status
+    ///         is Executing (not Executed), so a reentrant rescue of the active proposal reverts here
+    ///         (round-6 finding 1). The escrow performs a typed transfer to its own immutable sink —
+    ///         never an arbitrary call, never a caller-supplied recipient, never touching auth.
+    function rescueFromEscrow(
+        ShwounsDAOTypes.Storage storage ds,
+        uint256 proposalId,
+        AssetKind kind,
+        address asset,
+        uint256 tokenId,
+        uint256 amount
+    ) external {
+        if (ds.executing) revert AlreadyExecuting(); // no recovery while a finalize is in flight
+        if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Executed) revert NotTerminal();
+
+        // Recompute the escrow address and verify its codehash (review §8): only a genuine clone at
+        // the predicted address is driven.
+        address escrow = escrowAddressOf(ds, proposalId);
+        if (escrow.codehash != _expectedEscrowCodehash(ds.proposalEscrowImplementation)) {
+            revert EscrowCodehashMismatch();
+        }
+
+        if (kind == AssetKind.ETH) {
+            IProposalEscrow(escrow).sweepETHToSink();
+        } else if (kind == AssetKind.ERC20) {
+            IProposalEscrow(escrow).sweepERC20ToSink(asset);
+        } else if (kind == AssetKind.ERC721) {
+            IProposalEscrow(escrow).sweepERC721ToSink(asset, tokenId);
+        } else {
+            IProposalEscrow(escrow).sweepERC1155ToSink(asset, tokenId, amount);
+        }
+        emit EscrowResidualRescued(proposalId, uint8(kind), asset, tokenId, amount);
     }
 
     // =========================================================================

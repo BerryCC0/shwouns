@@ -13,6 +13,7 @@ import {ShwounsDAOProposals} from "../../src/governance/ShwounsDAOProposals.sol"
 import {ShwounsDAOTypes, IShwounsTokenLike} from "../../src/governance/ShwounsDAOInterfaces.sol";
 import {ProposalEscrow, IProposalEscrow} from "../../src/governance/ProposalEscrow.sol";
 import {GovernanceAuthRegistry} from "../../src/governance/GovernanceAuthRegistry.sol";
+import {GovernanceRewards} from "../../src/rewards/GovernanceRewards.sol";
 
 import {ERC6551Registry} from "../mocks/ERC6551Registry.sol";
 import {MockDescriptor} from "../mocks/MockDescriptor.sol";
@@ -35,6 +36,7 @@ contract LifecycleInvariantsTest is Test {
     ShwounsVault vaultImpl;
     ShwounsDAOLogic dao;
     GovernanceAuthRegistry authRegistry;
+    GovernanceRewards escrowSink; // residual sink baked into the escrow impl (for rescue tests)
 
     address foundersDAO = makeAddr("foundersDAO");
     address alice = makeAddr("alice");
@@ -84,9 +86,10 @@ contract LifecycleInvariantsTest is Test {
         registry.setDAOLogic(address(dao));
         authRegistry.bindDAOLogic(address(dao)); // governed contracts now accept the active escrow
 
-        // Per-proposal escrow implementation (EIP-1167 clone source). daoLogic = the DAO proxy; the
-        // residual sink is a placeholder (rescue isn't exercised by these suites).
-        ProposalEscrow escrowImpl = new ProposalEscrow(address(dao), address(0xBEEF));
+        // Per-proposal escrow implementation (EIP-1167 clone source). daoLogic = the DAO proxy;
+        // residualSink = a GovernanceRewards holder (so rescue residuals have a real receiver).
+        escrowSink = new GovernanceRewards(address(0));
+        ProposalEscrow escrowImpl = new ProposalEscrow(address(dao), address(escrowSink));
         dao.setProposalEscrowImplementation(address(escrowImpl));
 
         aliceNoun = _mintTo(alice);

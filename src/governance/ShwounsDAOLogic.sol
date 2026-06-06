@@ -675,6 +675,21 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
         ds.refundStuckProposal(proposalId, assetsToRefund);
     }
 
+    /// @notice Recover stray residual assets from a TERMINAL proposal's escrow to the immutable
+    ///         GovernanceRewards sink (A8). Permissionless — settled — but strictly terminal-gated
+    ///         in the library (only after Executed; never mid-execution). ETH ignores asset/tokenId/
+    ///         amount; ERC-20 uses `asset`; ERC-721 uses `asset`+`tokenId`; ERC-1155 uses
+    ///         `asset`+`tokenId`(id)+`amount`.
+    function rescueFromEscrow(
+        uint256 proposalId,
+        ShwounsDAOProposals.AssetKind kind,
+        address asset,
+        uint256 tokenId,
+        uint256 amount
+    ) external {
+        ds.rescueFromEscrow(proposalId, kind, asset, tokenId, amount);
+    }
+
     // -------------------------------------------------------------------------
     // Receive ETH (proposals can have value > 0; DAOLogic accumulates funds via collect)
     // -------------------------------------------------------------------------

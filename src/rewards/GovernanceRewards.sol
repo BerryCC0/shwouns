@@ -21,9 +21,11 @@
 pragma solidity ^0.8.19;
 
 import { ERC721Holder } from '@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol';
+import { ERC1155Holder } from '@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol';
 import { IERC20 } from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import { SafeERC20 } from '@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol';
 import { IERC721 } from '@openzeppelin/contracts/token/ERC721/IERC721.sol';
+import { IERC1155 } from '@openzeppelin/contracts/token/ERC1155/IERC1155.sol';
 
 import { ApprovalRegistry } from './ApprovalRegistry.sol';
 import { GovernedOwnable } from '../governance/GovernedOwnable.sol';
@@ -37,7 +39,7 @@ interface IDAOLogicForRewards {
         external view returns (uint256 forVotes, uint256 againstVotes, uint256 abstainVotes);
 }
 
-contract GovernanceRewards is GovernedOwnable, ERC721Holder {
+contract GovernanceRewards is GovernedOwnable, ERC721Holder, ERC1155Holder {
     using SafeERC20 for IERC20;
 
     /// @param _governanceAuth The GovernanceAuthRegistry (so DAO governance can sweep / configure
@@ -84,6 +86,8 @@ contract GovernanceRewards is GovernedOwnable, ERC721Holder {
     event ShwounTransferred(uint256 indexed shwounId, address indexed to);
     event ETHSwept(address indexed to, uint256 amount);
     event ERC20Swept(address indexed token, address indexed to, uint256 amount);
+    event ERC721Swept(address indexed token, address indexed to, uint256 tokenId);
+    event ERC1155Swept(address indexed token, address indexed to, uint256 id, uint256 amount);
 
     event DAOLogicSet(address indexed dao);
     event ApprovalRegistrySet(address indexed registry);
@@ -260,6 +264,19 @@ contract GovernanceRewards is GovernedOwnable, ERC721Holder {
     function sweepERC20(address token, address to, uint256 amount) external onlyOwner {
         IERC20(token).safeTransfer(to, amount);
         emit ERC20Swept(token, to, amount);
+    }
+
+    /// @notice Generic ERC-721 sweep (A8) — lets governance recover NFT residuals routed here by
+    ///         rescueFromEscrow. Governance-gated (owner = DAO via the escrow).
+    function sweepERC721(address token, uint256 tokenId, address to) external onlyOwner {
+        IERC721(token).safeTransferFrom(address(this), to, tokenId);
+        emit ERC721Swept(token, to, tokenId);
+    }
+
+    /// @notice Generic ERC-1155 sweep (A8). Governance-gated.
+    function sweepERC1155(address token, uint256 id, uint256 amount, address to) external onlyOwner {
+        IERC1155(token).safeTransferFrom(address(this), to, id, amount, "");
+        emit ERC1155Swept(token, to, id, amount);
     }
 
     function ethBalance() external view returns (uint256) {

@@ -30,6 +30,10 @@ pragma solidity ^0.8.19;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { IERC721 } from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import { IERC1155 } from "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
+import { ERC721Holder } from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
+import { ERC1155Holder } from "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
 
 /// @notice The slim surface DAOLogic drives. Kept minimal so the library can call it without
 ///         importing the full contract.
@@ -38,9 +42,13 @@ interface IProposalEscrow {
     function residualSink() external view returns (address);
     function execute(address[] calldata targets, uint256[] calldata values, bytes[] calldata calldatas) external;
     function payOut(address asset, address to, uint256 amount) external;
+    function sweepETHToSink() external;
+    function sweepERC20ToSink(address token) external;
+    function sweepERC721ToSink(address token, uint256 tokenId) external;
+    function sweepERC1155ToSink(address token, uint256 id, uint256 amount) external;
 }
 
-contract ProposalEscrow {
+contract ProposalEscrow is ERC721Holder, ERC1155Holder {
     using SafeERC20 for IERC20;
 
     /// @notice The Shwouns DAOLogic proxy — the ONLY address permitted to drive this escrow.
@@ -109,5 +117,35 @@ contract ProposalEscrow {
         } else {
             IERC20(asset).safeTransfer(to, amount);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Residual recovery (A8) — typed transfers to the IMMUTABLE residual sink ONLY.
+    //
+    // Driven by DAOLogic's permissionless, strictly-terminal-gated rescueFromEscrow. These are the
+    // ONLY way value leaves a finalized/refunded escrow besides payOut, and they can send ONLY to
+    // `residualSink` (the escrow chooses the destination from its own immutable, never a caller-
+    // supplied recipient). They never make an arbitrary call and never touch executor authentication.
+    // -------------------------------------------------------------------------
+
+    function sweepETHToSink() external onlyDAOLogic {
+        uint256 bal = address(this).balance;
+        if (bal == 0) return;
+        (bool ok, ) = residualSink.call{ value: bal }("");
+        if (!ok) revert ETHTransferFailed();
+    }
+
+    function sweepERC20ToSink(address token) external onlyDAOLogic {
+        uint256 bal = IERC20(token).balanceOf(address(this));
+        if (bal == 0) return;
+        IERC20(token).safeTransfer(residualSink, bal);
+    }
+
+    function sweepERC721ToSink(address token, uint256 tokenId) external onlyDAOLogic {
+        IERC721(token).safeTransferFrom(address(this), residualSink, tokenId);
+    }
+
+    function sweepERC1155ToSink(address token, uint256 id, uint256 amount) external onlyDAOLogic {
+        IERC1155(token).safeTransferFrom(address(this), residualSink, id, amount, "");
     }
 }
