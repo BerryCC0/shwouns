@@ -134,13 +134,20 @@ for design rationale — read it before making non-obvious changes.
 
 ## What's NOT done
 
-> **Status (June 2026):** A two-round security review disproved the earlier "protocol logic
-> complete" framing — the snapshot→collect→finalize mechanic had 4 critical bugs (vault-set not
-> frozen at queue, collect accepting arbitrary IDs, zero-funding proposals bricking, commingled
-> funds) and the governance layer was an MVP. The **correctness gate is now complete** on branch
-> `governance-parity-and-lifecycle-fixes` (lifecycle redesign + sound signed proposals + dynamic
-> quorum/threshold/calldata fixes + vote-by-signature; 121 tests). See
-> `~/.claude/plans/hey-claude-we-ve-been-velvet-canyon.md`.
+> **Status (June 2026):** A 3rd review (OpenAI Codex, `AUDIT_REPORT.md`, commit 8c1ac0c) found
+> 14 findings (3C/3H/6M/2L) — all verified to reproduce. The **full security remediation is now
+> IMPLEMENTED** on branch `security-remediation` per `REMEDIATION_PLAN.md` v6 +
+> `ARCHITECTURE_REVIEW_A.md`: all 14 findings fixed across 8 phased commits; the 13 audit PoCs are
+> flipped to assert safe behavior (permanent regressions); **204 tests pass**. Both UUPS proxies'
+> storage layouts are **byte-identical to baseline** (`./script/check-storage-layout.sh`). Core of
+> the fix: per-proposal `ProposalEscrow` clones execute all actions (closing the C-01/C-02 fund-
+> isolation breaks), a `GovernanceAuthRegistry` + `GovernedOwnable` authenticate the active escrow,
+> append-only active set + paged queue-freeze, contribution-based refunds, reservation-accounted
+> rewards, and a persistent `Bootstrap` coordinator with a one-shot no-permanent-EOA handoff.
+> **Do NOT deploy** until the focused post-implementation audit (the gate the plan mandates).
+>
+> _(Earlier: the correctness gate + V4 parity landed on `governance-parity-and-lifecycle-fixes`,
+> which `security-remediation` builds on. See `~/.claude/plans/hey-claude-we-ve-been-velvet-canyon.md`.)_
 
 - **Remaining V4 parity** — admin param bounds + `initialize` validation (needs migrating tests off
   votingPeriod=5 / threshold=0), dynamic-quorum seed-at-init, proposal editing (Updatable +

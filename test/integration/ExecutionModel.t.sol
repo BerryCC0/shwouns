@@ -75,6 +75,14 @@ contract ExecutionModelTest is LifecycleInvariantsTest {
 
     // ---- executor-authentication predicate (review §5, §12.5, §12.7) ----
 
+    /// review §12.14: outside any execution, the predicate is closed for EVERY candidate, and the
+    /// transient state is consistent (no lock, no active proposal).
+    function testFuzz_isActiveExecutor_falseWhenNotExecuting(address candidate) public {
+        assertFalse(dao.executing(), "no execution in progress");
+        assertEq(dao.activeProposalId(), 0, "no active proposal");
+        assertFalse(dao.isActiveExecutor(candidate), "predicate closed for any candidate when idle");
+    }
+
     function test_isActiveExecutor_falseOutsideExecution() public {
         uint256 pid = _proposeETH(alice, recipientA, 2 ether);
         _passCollect(pid);
