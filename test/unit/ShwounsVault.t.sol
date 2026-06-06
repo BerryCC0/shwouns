@@ -34,7 +34,7 @@ contract ShwounsVaultTest is Test {
         token = new MockERC20();
 
         // 3. Deployment dance per ShwounsVaultRegistry header docs
-        registry = new ShwounsVaultRegistry(address(nft));
+        registry = new ShwounsVaultRegistry(address(nft), address(0));
         vaultImpl = new ShwounsVault(address(registry));
         registry.setVaultImplementation(address(vaultImpl));
         registry.setDAOLogic(daoLogic);

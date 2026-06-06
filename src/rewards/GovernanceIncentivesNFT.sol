@@ -13,24 +13,33 @@
 pragma solidity ^0.8.19;
 
 import { ERC721 } from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
+import { GovernedOwnable } from "../governance/GovernedOwnable.sol";
 
-contract GovernanceIncentivesNFT is ERC721, Ownable {
+contract GovernanceIncentivesNFT is ERC721, GovernedOwnable {
     uint256 public mintPrice;
     uint256 public nextTokenId = 1;
 
+    /// @notice Recipient of mint proceeds (A6). Decoupled from `owner()` so the DAO can OWN the GI
+    ///         NFT (and govern `setMintPrice`) while proceeds still flow to GovernanceRewards.
+    ///         Falls back to `owner()` until set.
+    address public proceedsRecipient;
+
     event MintPriceUpdated(uint256 oldPrice, uint256 newPrice);
+    event ProceedsRecipientUpdated(address oldRecipient, address newRecipient);
     event Minted(address indexed to, uint256 indexed tokenId, uint256 pricePaid);
 
     error InsufficientPayment();
     error ProceedsForwardFailed();
 
-    constructor(uint256 _mintPrice) ERC721("Shwouns Governance Incentives", "SHWN-GI") {
+    constructor(uint256 _mintPrice, address _governanceAuth)
+        ERC721("Shwouns Governance Incentives", "SHWN-GI")
+        GovernedOwnable(_governanceAuth)
+    {
         mintPrice = _mintPrice;
     }
 
-    /// @notice Mint a new GI NFT. Must send at least `mintPrice` ETH. Mint proceeds are
-    ///         forwarded to the contract owner.
+    /// @notice Mint a new GI NFT. Must send at least `mintPrice` ETH. Proceeds forward to
+    ///         `proceedsRecipient` (GovernanceRewards), or `owner()` if unset.
     function mint() external payable returns (uint256 tokenId) {
         if (msg.value < mintPrice) revert InsufficientPayment();
         tokenId = nextTokenId++;
@@ -38,7 +47,8 @@ contract GovernanceIncentivesNFT is ERC721, Ownable {
         emit Minted(msg.sender, tokenId, msg.value);
 
         if (msg.value > 0) {
-            (bool ok, ) = owner().call{value: msg.value}("");
+            address to = proceedsRecipient == address(0) ? owner() : proceedsRecipient;
+            (bool ok, ) = to.call{value: msg.value}("");
             if (!ok) revert ProceedsForwardFailed();
         }
     }
@@ -47,5 +57,12 @@ contract GovernanceIncentivesNFT is ERC721, Ownable {
         uint256 old = mintPrice;
         mintPrice = newPrice;
         emit MintPriceUpdated(old, newPrice);
+    }
+
+    /// @notice Set where mint proceeds are forwarded (A6). Governable (owner = DAO via escrow).
+    function setProceedsRecipient(address newRecipient) external onlyOwner {
+        address old = proceedsRecipient;
+        proceedsRecipient = newRecipient;
+        emit ProceedsRecipientUpdated(old, newRecipient);
     }
 }

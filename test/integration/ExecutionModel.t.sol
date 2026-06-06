@@ -6,6 +6,20 @@ import {ShwounsDAOLogic} from "../../src/governance/ShwounsDAOLogic.sol";
 import {ShwounsDAOProposals} from "../../src/governance/ShwounsDAOProposals.sol";
 import {ShwounsDAOTypes} from "../../src/governance/ShwounsDAOInterfaces.sol";
 import {ProposalEscrow, IProposalEscrow} from "../../src/governance/ProposalEscrow.sol";
+import {GovernanceAuthRegistry} from "../../src/governance/GovernanceAuthRegistry.sol";
+import {ShwounsToken} from "../../src/token/ShwounsToken.sol";
+import {GovernanceIncentivesNFT} from "../../src/rewards/GovernanceIncentivesNFT.sol";
+
+/// @dev Relays a call to another contract. Used to prove active-executor authority does NOT flow
+///      transitively: a governed call made by this relay has `msg.sender == relay`, not the escrow.
+contract AuthRelay {
+    function relay(address target, bytes calldata data) external {
+        (bool ok, bytes memory ret) = target.call(data);
+        if (!ok) {
+            assembly { revert(add(ret, 0x20), mload(ret)) }
+        }
+    }
+}
 
 /// @dev Records the DAO's transient execution state at the instant it receives ETH — i.e. while the
 ///      proposal is mid-finalize, called from inside the escrow's execute().
@@ -190,5 +204,119 @@ contract ExecutionModelTest is LifecycleInvariantsTest {
         // setUp already set + locked it; a second set must revert.
         vm.expectRevert(ShwounsDAOLogic.EscrowImplLocked.selector);
         dao.setProposalEscrowImplementation(address(0xCAFE));
+    }
+
+    // =========================================================================
+    // §A5/§A6 — governance actions drive governed contracts via the active escrow
+    // =========================================================================
+
+    function _proposeCall(address proposer, address target, uint256 value, bytes memory data)
+        internal
+        returns (uint256 pid)
+    {
+        address[] memory targets = new address[](1);
+        uint256[] memory values = new uint256[](1);
+        string[] memory sigs = new string[](1);
+        bytes[] memory cds = new bytes[](1);
+        targets[0] = target; values[0] = value; cds[0] = data;
+        vm.prank(proposer);
+        pid = dao.propose(targets, values, sigs, cds, "gov action");
+    }
+
+    /// review §12.1: a governance action executing from the deterministic escrow can drive a
+    /// governed onlyOwner function (here the governed contract is still owned by the test harness —
+    /// the escrow authenticates via the bound registry, NOT via ownership).
+    function test_governanceAction_fromEscrow_drivesGovernedOnlyOwner() public {
+        uint256 pid = _proposeCall(
+            alice, address(token), 0,
+            abi.encodeWithSelector(ShwounsToken.setContractURIHash.selector, "gov")
+        );
+        _passToSucceeded(pid);
+        dao.queue(pid); // zero-funding → immediately Collected
+        dao.finalize(pid);
+        assertEq(token.contractURI(), "ipfs://gov", "governed onlyOwner fn executed via escrow");
+    }
+
+    /// review §12.5: a finished escrow is stale — it cannot drive a governed function after finalize.
+    function test_staleEscrow_cannotDriveGovernedFn() public {
+        uint256 pid = _proposeCall(
+            alice, address(token), 0,
+            abi.encodeWithSelector(ShwounsToken.setContractURIHash.selector, "gov")
+        );
+        _passToSucceeded(pid);
+        dao.queue(pid);
+        address escrow = dao.escrowAddressOf(pid);
+        dao.finalize(pid);
+
+        vm.prank(escrow);
+        vm.expectRevert("Ownable: caller is not the owner");
+        token.setContractURIHash("stale");
+    }
+
+    /// review §12.5: a forged/random caller never passes a governed onlyOwner gate.
+    function test_forgedCaller_cannotDriveGovernedFn() public {
+        vm.prank(makeAddr("attacker"));
+        vm.expectRevert("Ownable: caller is not the owner");
+        token.setContractURIHash("nope");
+    }
+
+    /// review §7/§12.6: authentication does NOT flow transitively. If the escrow calls a target and
+    /// that target calls a governed contract, the second call's msg.sender is the target (not the
+    /// escrow), so it fails — and the whole finalize reverts atomically.
+    function test_authority_doesNotRelayThroughTarget() public {
+        AuthRelay relay = new AuthRelay();
+        bytes memory inner = abi.encodeWithSelector(ShwounsToken.setContractURIHash.selector, "relayed");
+        bytes memory outer = abi.encodeWithSelector(AuthRelay.relay.selector, address(token), inner);
+        uint256 pid = _proposeCall(alice, address(relay), 0, outer);
+        _passToSucceeded(pid);
+        dao.queue(pid);
+
+        vm.expectRevert(); // relay's nested call to token reverts (Ownable) → finalize reverts
+        dao.finalize(pid);
+        assertEq(token.contractURI(), "ipfs://", "governed state unchanged");
+    }
+
+    /// §A6: governance sets the GI NFT mint price via the escrow, and mint proceeds still reach the
+    /// decoupled proceedsRecipient (not the owner).
+    function test_a6_governanceSetsMintPrice_proceedsToRecipient() public {
+        GovernanceIncentivesNFT gi = new GovernanceIncentivesNFT(0.01 ether, address(authRegistry));
+        address sink = makeAddr("grSink");
+        gi.setProceedsRecipient(sink);
+
+        uint256 pid = _proposeCall(
+            alice, address(gi), 0,
+            abi.encodeWithSelector(GovernanceIncentivesNFT.setMintPrice.selector, uint256(0.05 ether))
+        );
+        _passToSucceeded(pid);
+        dao.queue(pid);
+        dao.finalize(pid);
+        assertEq(gi.mintPrice(), 0.05 ether, "mint price set via governance");
+
+        vm.deal(alice, 1 ether);
+        vm.prank(alice);
+        gi.mint{value: 0.05 ether}();
+        assertEq(sink.balance, 0.05 ether, "proceeds reached recipient, not owner");
+    }
+
+    // =========================================================================
+    // §A5 — GovernanceAuthRegistry fail-closed binding
+    // =========================================================================
+
+    function test_authRegistry_failClosed_andBindsOnce() public {
+        GovernanceAuthRegistry fresh = new GovernanceAuthRegistry(); // binder = this test contract
+        assertFalse(fresh.isActiveExecutor(address(this)), "unbound registry -> false");
+
+        vm.prank(makeAddr("notBinder"));
+        vm.expectRevert(GovernanceAuthRegistry.NotBinder.selector);
+        fresh.bindDAOLogic(address(dao));
+
+        vm.expectRevert(GovernanceAuthRegistry.NotDeployed.selector);
+        fresh.bindDAOLogic(makeAddr("eoa")); // not a deployed contract
+
+        fresh.bindDAOLogic(address(dao)); // binder, once, to a deployed proxy
+        assertEq(fresh.daoLogic(), address(dao));
+
+        vm.expectRevert(GovernanceAuthRegistry.AlreadyBound.selector);
+        fresh.bindDAOLogic(address(dao));
     }
 }

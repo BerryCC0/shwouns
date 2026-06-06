@@ -20,13 +20,13 @@
 
 pragma solidity ^0.8.19;
 
-import { Ownable } from '@openzeppelin/contracts/access/Ownable.sol';
 import { ERC721Holder } from '@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol';
 import { IERC20 } from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import { SafeERC20 } from '@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol';
 import { IERC721 } from '@openzeppelin/contracts/token/ERC721/IERC721.sol';
 
 import { ApprovalRegistry } from './ApprovalRegistry.sol';
+import { GovernedOwnable } from '../governance/GovernedOwnable.sol';
 
 /// @dev Minimal interface for the bits of DAOLogic that GR reads from. Uses *Unpacked
 ///      naming to avoid clashing with DAOLogic's existing struct-returning getReceipt.
@@ -37,8 +37,12 @@ interface IDAOLogicForRewards {
         external view returns (uint256 forVotes, uint256 againstVotes, uint256 abstainVotes);
 }
 
-contract GovernanceRewards is Ownable, ERC721Holder {
+contract GovernanceRewards is GovernedOwnable, ERC721Holder {
     using SafeERC20 for IERC20;
+
+    /// @param _governanceAuth The GovernanceAuthRegistry (so DAO governance can sweep / configure
+    ///        via an authenticated proposal escrow). address(0) reduces to plain Ownable.
+    constructor(address _governanceAuth) GovernedOwnable(_governanceAuth) {}
 
     // -------------------------------------------------------------------------
     // External wiring (set once, locked)

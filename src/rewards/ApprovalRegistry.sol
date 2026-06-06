@@ -13,10 +13,10 @@
 
 pragma solidity ^0.8.19;
 
-import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { IERC721 } from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import { GovernedOwnable } from "../governance/GovernedOwnable.sol";
 
-contract ApprovalRegistry is Ownable {
+contract ApprovalRegistry is GovernedOwnable {
     IERC721 public immutable giNFT;
     mapping(uint256 => bool) public approvedTokenIds;
 
@@ -27,7 +27,7 @@ contract ApprovalRegistry is Ownable {
     error NotApproved();
     error InvalidTokenId();
 
-    constructor(IERC721 _giNFT) {
+    constructor(IERC721 _giNFT, address _governanceAuth) GovernedOwnable(_governanceAuth) {
         if (address(_giNFT) == address(0)) revert InvalidTokenId();
         giNFT = _giNFT;
     }

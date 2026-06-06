@@ -8,7 +8,7 @@
 
 pragma solidity ^0.8.6;
 
-import { Ownable } from '@openzeppelin/contracts/access/Ownable.sol';
+import { GovernedOwnable } from '../governance/GovernedOwnable.sol';
 import { Strings } from '@openzeppelin/contracts/utils/Strings.sol';
 import { IShwounsDescriptor } from '../interfaces/IShwounsDescriptor.sol';
 import { IShwounsSeeder } from '../interfaces/IShwounsSeeder.sol';
@@ -17,7 +17,7 @@ import { ISVGRenderer } from '../interfaces/ISVGRenderer.sol';
 import { IShwounsArt } from '../interfaces/IShwounsArt.sol';
 import { IInflator } from '../interfaces/IInflator.sol';
 
-contract ShwounsDescriptor is IShwounsDescriptor, Ownable {
+contract ShwounsDescriptor is IShwounsDescriptor, GovernedOwnable {
     using Strings for uint256;
 
     // https://creativecommons.org/publicdomain/zero/1.0/legalcode.txt
@@ -35,7 +35,9 @@ contract ShwounsDescriptor is IShwounsDescriptor, Ownable {
         _;
     }
 
-    constructor(IShwounsArt _art, ISVGRenderer _renderer) {
+    constructor(IShwounsArt _art, ISVGRenderer _renderer, address _governanceAuth)
+        GovernedOwnable(_governanceAuth)
+    {
         art = _art;
         renderer = _renderer;
     }

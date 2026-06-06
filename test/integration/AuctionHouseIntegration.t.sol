@@ -50,13 +50,13 @@ contract AuctionHouseIntegrationTest is Test {
         weth = new MockWETH();
         descriptor = new MockDescriptor();
         seeder = new ShwounsSeeder();
-        rewards = new GovernanceRewards();
+        rewards = new GovernanceRewards(address(0));
 
         // 3. ShwounsToken (auctionHouse address is set later via setMinter)
-        token = new ShwounsToken(foundersDAO, address(this), descriptor, seeder);
+        token = new ShwounsToken(foundersDAO, address(this), descriptor, seeder, address(0));
 
         // 4. VaultRegistry + Vault impl
-        registry = new ShwounsVaultRegistry(address(token));
+        registry = new ShwounsVaultRegistry(address(token), address(0));
         vaultImpl = new ShwounsVault(address(registry));
         registry.setVaultImplementation(address(vaultImpl));
         registry.setDAOLogic(daoLogic);
@@ -65,7 +65,8 @@ contract AuctionHouseIntegrationTest is Test {
         auctionHouseImpl = new ShwounsAuctionHouse(
             IShwounsToken(address(token)),
             address(weth),
-            AUCTION_DURATION
+            AUCTION_DURATION,
+            address(0)
         );
         bytes memory initData = abi.encodeWithSelector(
             ShwounsAuctionHouse.initialize.selector,
@@ -187,7 +188,8 @@ contract AuctionHouseIntegrationTest is Test {
         ShwounsAuctionHouse newImpl = new ShwounsAuctionHouse(
             IShwounsToken(address(token)),
             address(weth),
-            AUCTION_DURATION
+            AUCTION_DURATION,
+            address(0)
         );
 
         // Upgrade
@@ -202,7 +204,8 @@ contract AuctionHouseIntegrationTest is Test {
         ShwounsAuctionHouse newImpl = new ShwounsAuctionHouse(
             IShwounsToken(address(token)),
             address(weth),
-            AUCTION_DURATION
+            AUCTION_DURATION,
+            address(0)
         );
 
         vm.prank(bob);

@@ -21,12 +21,12 @@ pragma solidity ^0.8.13;
 /// After step 4 and step 7, the registry is fully configured and immutable in practice.
 
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {IERC6551Registry} from "./erc6551/interfaces/IERC6551Registry.sol";
 import {IShwounsVaultRegistry} from "./IShwounsVaultRegistry.sol";
+import {GovernedOwnable} from "../governance/GovernedOwnable.sol";
 
-contract ShwounsVaultRegistry is IShwounsVaultRegistry, Ownable {
+contract ShwounsVaultRegistry is IShwounsVaultRegistry, GovernedOwnable {
     using EnumerableSet for EnumerableSet.UintSet;
 
     /// @notice The canonical ERC-6551 Registry. Same address on every major chain per EIP-6551.
@@ -63,7 +63,7 @@ contract ShwounsVaultRegistry is IShwounsVaultRegistry, Ownable {
     error NotAuthorizedVault();
     error VaultImplementationNotSet();
 
-    constructor(address _shwounsToken) {
+    constructor(address _shwounsToken, address _governanceAuth) GovernedOwnable(_governanceAuth) {
         if (_shwounsToken == address(0)) revert InvalidAddress();
         shwounsToken = _shwounsToken;
     }

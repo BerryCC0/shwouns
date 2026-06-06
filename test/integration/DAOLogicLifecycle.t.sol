@@ -46,8 +46,8 @@ contract DAOLogicLifecycleTest is Test {
         ShwounsSeeder seeder = new ShwounsSeeder();
         MockDescriptor desc = new MockDescriptor();
         // Use this contract as minter so we can mint directly in tests
-        token = new ShwounsToken(foundersDAO, address(this), desc, seeder);
-        registry = new ShwounsVaultRegistry(address(token));
+        token = new ShwounsToken(foundersDAO, address(this), desc, seeder, address(0));
+        registry = new ShwounsVaultRegistry(address(token), address(0));
         vaultImpl = new ShwounsVault(address(registry));
         registry.setVaultImplementation(address(vaultImpl));
 

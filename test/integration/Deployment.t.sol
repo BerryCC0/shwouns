@@ -143,8 +143,12 @@ contract DeploymentTest is Test {
         assertEq(address(d.approvalRegistry.giNFT()), address(d.giNFT));
     }
 
-    function test_wiring_giNFT_ownerIsRewards() public {
-        assertEq(d.giNFT.owner(), address(d.rewards));
+    /// A6: GI NFT proceeds are decoupled from ownership. `proceedsRecipient` (where mint proceeds
+    /// flow) is GovernanceRewards, while OWNERSHIP goes to governance (the Deploy contract holds it
+    /// transiently here; transferOwnershipToDAO hands it to the DAO).
+    function test_wiring_giNFT_proceedsRecipientIsRewards() public {
+        assertEq(d.giNFT.proceedsRecipient(), address(d.rewards), "proceeds -> GR");
+        assertEq(d.giNFT.owner(), address(deployer), "owned by Deploy until handoff");
     }
 
     // -------------------------------------------------------------------------
@@ -176,6 +180,7 @@ contract DeploymentTest is Test {
         // Before transfer, owner is the Deploy contract (which created all the Ownables)
         assertEq(d.token.owner(), address(deployer));
         assertEq(d.rewards.owner(), address(deployer));
+        assertEq(d.giNFT.owner(), address(deployer)); // A6: GI NFT owned by deployer pre-handoff
 
         deployer.transferOwnershipToDAO(d);
 
@@ -184,6 +189,9 @@ contract DeploymentTest is Test {
         assertEq(d.rewards.owner(), address(d.dao));
         assertEq(d.approvalRegistry.owner(), address(d.dao));
         assertEq(d.auctionHouse.owner(), address(d.dao));
+        assertEq(d.giNFT.owner(), address(d.dao)); // A6: GI NFT ownership now governance
+        // proceeds still route to GR regardless of ownership
+        assertEq(d.giNFT.proceedsRecipient(), address(d.rewards));
         // d.descriptor is address(0) in this test (we used preDeployedDescriptor for art);
         // transferOwnershipToDAO skips it in that case. Skip the assertion too.
     }

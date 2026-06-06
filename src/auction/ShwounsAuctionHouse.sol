@@ -28,6 +28,7 @@ import { IShwounsToken } from '../interfaces/IShwounsToken.sol';
 import { IWETH } from '../interfaces/IWETH.sol';
 import { IChainalysisSanctionsList } from '../interfaces/IChainalysisSanctionsList.sol';
 import { IShwounsVaultRegistry } from '../vault/IShwounsVaultRegistry.sol';
+import { IGovernanceAuthRegistry } from '../governance/GovernanceAuthRegistry.sol';
 
 contract ShwounsAuctionHouse is
     IShwounsAuctionHouse,
@@ -51,6 +52,10 @@ contract ShwounsAuctionHouse is
     /// @notice Duration of a single auction (seconds).
     uint256 public immutable duration;
 
+    /// @notice Auth registry (A5). Immutable lives in impl bytecode, not proxy storage — so it adds
+    ///         no storage slot. onlyOwner functions also accept the active proposal escrow via this.
+    IGovernanceAuthRegistry public immutable governanceAuth;
+
     uint192 public reservePrice;
     uint56 public timeBuffer;
     uint8 public minBidIncrementPercentage;
@@ -72,10 +77,20 @@ contract ShwounsAuctionHouse is
     error GovernanceRewardsNotSet();
     error VaultRegistryNotSet();
 
-    constructor(IShwounsToken _shwouns, address _weth, uint256 _duration) initializer {
+    constructor(IShwounsToken _shwouns, address _weth, uint256 _duration, address _governanceAuth) initializer {
         shwouns = _shwouns;
         weth = _weth;
         duration = _duration;
+        governanceAuth = IGovernanceAuthRegistry(_governanceAuth);
+    }
+
+    /// @dev onlyOwner also accepts the currently-authenticated active proposal escrow (A5), so DAO
+    ///      governance can pause/upgrade/tune the auction house via an approved proposal. Mirrors
+    ///      GovernedOwnable for this OwnableUpgradeable contract.
+    function _checkOwner() internal view override {
+        if (msg.sender == owner()) return;
+        if (address(governanceAuth) != address(0) && governanceAuth.isActiveExecutor(msg.sender)) return;
+        revert("Ownable: caller is not the owner");
     }
 
     /// @notice Initialize the auction house. Sets initial knobs and pauses for setup.

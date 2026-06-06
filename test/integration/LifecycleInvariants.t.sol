@@ -12,6 +12,7 @@ import {ShwounsDAOLogic} from "../../src/governance/ShwounsDAOLogic.sol";
 import {ShwounsDAOProposals} from "../../src/governance/ShwounsDAOProposals.sol";
 import {ShwounsDAOTypes, IShwounsTokenLike} from "../../src/governance/ShwounsDAOInterfaces.sol";
 import {ProposalEscrow, IProposalEscrow} from "../../src/governance/ProposalEscrow.sol";
+import {GovernanceAuthRegistry} from "../../src/governance/GovernanceAuthRegistry.sol";
 
 import {ERC6551Registry} from "../mocks/ERC6551Registry.sol";
 import {MockDescriptor} from "../mocks/MockDescriptor.sol";
@@ -33,6 +34,7 @@ contract LifecycleInvariantsTest is Test {
     ShwounsVaultRegistry registry;
     ShwounsVault vaultImpl;
     ShwounsDAOLogic dao;
+    GovernanceAuthRegistry authRegistry;
 
     address foundersDAO = makeAddr("foundersDAO");
     address alice = makeAddr("alice");
@@ -53,10 +55,13 @@ contract LifecycleInvariantsTest is Test {
         ERC6551Registry tmp = new ERC6551Registry();
         vm.etch(CANONICAL_REGISTRY, address(tmp).code);
 
+        // Auth registry deployed first (this test contract is its binder); bound to the DAO below.
+        authRegistry = new GovernanceAuthRegistry();
+
         ShwounsSeeder seeder = new ShwounsSeeder();
         MockDescriptor desc = new MockDescriptor();
-        token = new ShwounsToken(foundersDAO, address(this), desc, seeder);
-        registry = new ShwounsVaultRegistry(address(token));
+        token = new ShwounsToken(foundersDAO, address(this), desc, seeder, address(authRegistry));
+        registry = new ShwounsVaultRegistry(address(token), address(authRegistry));
         vaultImpl = new ShwounsVault(address(registry));
         registry.setVaultImplementation(address(vaultImpl));
 
@@ -77,6 +82,7 @@ contract LifecycleInvariantsTest is Test {
         );
         dao = ShwounsDAOLogic(payable(address(new ERC1967Proxy(address(daoImpl), initData))));
         registry.setDAOLogic(address(dao));
+        authRegistry.bindDAOLogic(address(dao)); // governed contracts now accept the active escrow
 
         // Per-proposal escrow implementation (EIP-1167 clone source). daoLogic = the DAO proxy; the
         // residual sink is a placeholder (rescue isn't exercised by these suites).

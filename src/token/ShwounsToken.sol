@@ -11,7 +11,7 @@
 
 pragma solidity ^0.8.6;
 
-import { Ownable } from '@openzeppelin/contracts/access/Ownable.sol';
+import { GovernedOwnable } from '../governance/GovernedOwnable.sol';
 import { ERC721Checkpointable } from './base/ERC721Checkpointable.sol';
 import { IShwounsDescriptorMinimal } from '../interfaces/IShwounsDescriptorMinimal.sol';
 import { IShwounsSeeder } from '../interfaces/IShwounsSeeder.sol';
@@ -19,7 +19,7 @@ import { IShwounsToken } from '../interfaces/IShwounsToken.sol';
 import { ERC721 } from './base/ERC721.sol';
 import { IERC721 } from '@openzeppelin/contracts/token/ERC721/IERC721.sol';
 
-contract ShwounsToken is IShwounsToken, Ownable, ERC721Checkpointable {
+contract ShwounsToken is IShwounsToken, GovernedOwnable, ERC721Checkpointable {
     // The founders DAO address (creators org). Receives every 10th Noun up to FOUNDERS_REWARD_ENDS.
     address public foundersDAO;
 
@@ -79,8 +79,9 @@ contract ShwounsToken is IShwounsToken, Ownable, ERC721Checkpointable {
         address _foundersDAO,
         address _minter,
         IShwounsDescriptorMinimal _descriptor,
-        IShwounsSeeder _seeder
-    ) ERC721('Shwouns', 'SHWN') {
+        IShwounsSeeder _seeder,
+        address _governanceAuth
+    ) ERC721('Shwouns', 'SHWN') GovernedOwnable(_governanceAuth) {
         foundersDAO = _foundersDAO;
         minter = _minter;
         descriptor = _descriptor;

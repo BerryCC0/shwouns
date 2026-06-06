@@ -31,6 +31,7 @@ import { ShwounsDAOLogic } from "../src/governance/ShwounsDAOLogic.sol";
 import { ShwounsDAOTypes, IShwounsTokenLike } from "../src/governance/ShwounsDAOInterfaces.sol";
 import { ShwounsDAOData } from "../src/governance/data/ShwounsDAOData.sol";
 import { ProposalEscrow } from "../src/governance/ProposalEscrow.sol";
+import { GovernanceAuthRegistry } from "../src/governance/GovernanceAuthRegistry.sol";
 
 /// @title Deploy — full Shwouns protocol deployment script
 ///
@@ -107,6 +108,7 @@ contract Deploy is Script {
         ShwounsArt art;                           // address(0) if a pre-deployed descriptor was used
         Inflator inflator;                         // address(0) if a pre-deployed art/inflator was used
         SVGRenderer renderer;                      // address(0) if a pre-deployed renderer was used
+        GovernanceAuthRegistry authRegistry;
         ShwounsVaultRegistry vaultRegistry;
         ShwounsVault vaultImpl;
         ShwounsAuctionHouse auctionHouse;          // proxy address
@@ -155,6 +157,12 @@ contract Deploy is Script {
     /// @notice Internal deploy used by both `run()` and tests. Tests call this directly
     ///         without broadcasting.
     function _deploy(Config memory cfg) public returns (Deployment memory d) {
+        // ─────── 0. Auth registry ───────
+        // Deployed FIRST so every governed contract can take an immutable `governanceAuth`
+        // reference at construction (A5). This Deploy contract is its binder; it is bound to the
+        // DAOLogic proxy once the proxy exists (step 6). Phase 6 moves binding into Bootstrap.
+        d.authRegistry = new GovernanceAuthRegistry();
+
         // ─────── 1. Art layer ───────
         // Three resolution paths for the descriptor (the thing token.descriptor() points to):
         //   (a) cfg.preDeployedDescriptor is set → use it. Skip everything else (used by tests
@@ -184,7 +192,7 @@ contract Deploy is Script {
                 artForDescriptor = IShwounsArt(address(d.art));
             }
 
-            d.descriptor = new ShwounsDescriptor(artForDescriptor, rendererForDescriptor);
+            d.descriptor = new ShwounsDescriptor(artForDescriptor, rendererForDescriptor, address(d.authRegistry));
             descriptorForToken = IShwounsDescriptorMinimal(address(d.descriptor));
 
             // If we deployed Art ourselves, hand off control to the real descriptor.
@@ -199,21 +207,24 @@ contract Deploy is Script {
             cfg.foundersDAO,
             msg.sender, // temporary minter; replaced by auction house after wiring
             descriptorForToken,
-            d.seeder
+            d.seeder,
+            address(d.authRegistry)
         );
 
         // ─────── 3. Vault layer (registry needs token; impl needs registry; lock impl) ───────
-        d.vaultRegistry = new ShwounsVaultRegistry(address(d.token));
+        d.vaultRegistry = new ShwounsVaultRegistry(address(d.token), address(d.authRegistry));
         d.vaultImpl = new ShwounsVault(address(d.vaultRegistry));
         d.vaultRegistry.setVaultImplementation(address(d.vaultImpl)); // locks
 
         // ─────── 4. Rewards + GI NFT + ApprovalRegistry ───────
-        d.rewards = new GovernanceRewards();
-        d.giNFT = new GovernanceIncentivesNFT(cfg.giMintPrice);
-        d.approvalRegistry = new ApprovalRegistry(IERC721(address(d.giNFT)));
+        d.rewards = new GovernanceRewards(address(d.authRegistry));
+        d.giNFT = new GovernanceIncentivesNFT(cfg.giMintPrice, address(d.authRegistry));
+        d.approvalRegistry = new ApprovalRegistry(IERC721(address(d.giNFT)), address(d.authRegistry));
 
-        // GI NFT mint proceeds forward to GovernanceRewards
-        d.giNFT.transferOwnership(address(d.rewards));
+        // A6: GI NFT mint proceeds go to GovernanceRewards via a decoupled proceedsRecipient, while
+        // OWNERSHIP of the GI NFT goes to governance (transferred to the DAO in transferOwnershipToDAO)
+        // so the DAO can govern setMintPrice.
+        d.giNFT.setProceedsRecipient(address(d.rewards));
 
         // Configure reward amounts
         d.rewards.setProposalRewardAmount(cfg.proposalReward);
@@ -224,7 +235,8 @@ contract Deploy is Script {
         d.auctionHouseImpl = new ShwounsAuctionHouse(
             IShwounsToken(address(d.token)),
             cfg.weth,
-            cfg.auctionDuration
+            cfg.auctionDuration,
+            address(d.authRegistry)
         );
         bytes memory ahInit = abi.encodeWithSelector(
             ShwounsAuctionHouse.initialize.selector,
@@ -272,6 +284,10 @@ contract Deploy is Script {
         d.dao = ShwounsDAOLogic(
             payable(address(new ERC1967Proxy(address(d.daoImpl), daoInit)))
         );
+
+        // Bind the auth registry to the DAOLogic proxy (A5). After this, every governed contract's
+        // onlyOwner gate accepts the currently-authenticated active proposal escrow.
+        d.authRegistry.bindDAOLogic(address(d.dao));
 
         // Configure objection period parameters
         if (cfg.lastMinuteWindowBlocks > 0) {
@@ -323,6 +339,8 @@ contract Deploy is Script {
         d.auctionHouse.transferOwnership(address(d.dao));
         // Token: DAO controls minter/descriptor/seeder updates + lock states
         d.token.transferOwnership(address(d.dao));
+        // GI NFT: DAO governs setMintPrice / proceedsRecipient (A6 — proceeds still flow to GR)
+        d.giNFT.transferOwnership(address(d.dao));
         // Descriptor: DAO controls art updates + lock states (skip if we used a
         // preDeployedDescriptor — that contract isn't owned by Deploy)
         if (address(d.descriptor) != address(0)) {

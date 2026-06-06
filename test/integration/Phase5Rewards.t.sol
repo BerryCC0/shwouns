@@ -59,20 +59,21 @@ contract Phase5RewardsTest is Test {
         // Phase 1+2 stack
         ShwounsSeeder seeder = new ShwounsSeeder();
         MockDescriptor desc = new MockDescriptor();
-        token = new ShwounsToken(foundersDAO, address(this), desc, seeder);
-        registry = new ShwounsVaultRegistry(address(token));
+        token = new ShwounsToken(foundersDAO, address(this), desc, seeder, address(0));
+        registry = new ShwounsVaultRegistry(address(token), address(0));
         vaultImpl = new ShwounsVault(address(registry));
         registry.setVaultImplementation(address(vaultImpl));
 
         // Phase 3 — GovernanceRewards (Phase 5 extended version)
-        rewards = new GovernanceRewards();
+        rewards = new GovernanceRewards(address(0));
 
         // Phase 5 — GI NFT + ApprovalRegistry
-        giNFT = new GovernanceIncentivesNFT(0.01 ether);
-        approvalRegistry = new ApprovalRegistry(IERC721(address(giNFT)));
+        giNFT = new GovernanceIncentivesNFT(0.01 ether, address(0));
+        approvalRegistry = new ApprovalRegistry(IERC721(address(giNFT)), address(0));
 
-        // GI NFT mint proceeds go to GovernanceRewards
-        giNFT.transferOwnership(address(rewards));
+        // A6: GI NFT mint proceeds go to GovernanceRewards via proceedsRecipient (ownership stays
+        // with this test contract so we can configure it directly).
+        giNFT.setProceedsRecipient(address(rewards));
 
         // Phase 4 DAO
         ShwounsDAOLogic daoImpl = new ShwounsDAOLogic();

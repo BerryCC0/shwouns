@@ -198,10 +198,11 @@ contract AuditFindingsTest is LifecycleInvariantsTest {
     }
 
     function test_audit_oneApprovedGINFTCanAuthorizeMultipleVoterClaims() public {
-        GovernanceRewards rewards = new GovernanceRewards();
-        GovernanceIncentivesNFT giNFT = new GovernanceIncentivesNFT(0);
-        ApprovalRegistry approvals = new ApprovalRegistry(IERC721(address(giNFT)));
-        giNFT.transferOwnership(address(rewards));
+        GovernanceRewards rewards = new GovernanceRewards(address(0));
+        GovernanceIncentivesNFT giNFT = new GovernanceIncentivesNFT(0, address(0));
+        ApprovalRegistry approvals = new ApprovalRegistry(IERC721(address(giNFT)), address(0));
+        // A6: proceeds route via proceedsRecipient (mintPrice=0 here, so no proceeds anyway);
+        // eligibility uses ownerOf(tokenId), not the GI NFT contract owner.
         rewards.setDAOLogic(address(dao));
         rewards.setApprovalRegistry(approvals);
         dao.setGovernanceRewards(address(rewards));
@@ -234,7 +235,7 @@ contract AuditFindingsTest is LifecycleInvariantsTest {
     }
 
     function test_audit_rewardPoolsCanBeAllocatedBeyondContractBalance() public {
-        GovernanceRewards rewards = new GovernanceRewards();
+        GovernanceRewards rewards = new GovernanceRewards(address(0));
         rewards.setDAOLogic(address(this));
         vm.deal(address(rewards), 0.1 ether);
 
