@@ -346,4 +346,45 @@ contract ShwounsVaultTest is Test {
         vm.expectRevert(ShwounsVaultRegistry.AlreadyLocked.selector);
         registry.setDAOLogic(address(0xdead));
     }
+
+    // -------------------------------------------------------------------------
+    // L-01 — ERC-1271 malformed signatures return invalid (non-magic), never revert
+    // -------------------------------------------------------------------------
+
+    bytes4 constant ERC1271_MAGIC = 0x1626ba7e; // IERC1271.isValidSignature.selector
+
+    function test_l01_malformedSignatures_returnNonMagic_noRevert() public {
+        ShwounsVault vault = _vaultFor(NOUN_ID);
+        bytes32 hash = keccak256("msg");
+
+        // Empty, <65 bytes, and garbage signatures must return a non-magic value and NOT revert.
+        assertTrue(vault.isValidSignature(hash, "") != ERC1271_MAGIC, "empty -> non-magic");
+        assertTrue(vault.isValidSignature(hash, hex"001122") != ERC1271_MAGIC, "short -> non-magic");
+        bytes memory garbage = new bytes(100);
+        assertTrue(vault.isValidSignature(hash, garbage) != ERC1271_MAGIC, "garbage -> non-magic");
+
+        // A v==0 (contract-sig) header with an out-of-bounds embedded offset must also be invalid.
+        bytes memory badOffset = abi.encodePacked(bytes32(uint256(uint160(alice))), bytes32(uint256(999)), uint8(0));
+        assertTrue(vault.isValidSignature(hash, badOffset) != ERC1271_MAGIC, "bad offset -> non-magic");
+    }
+
+    function test_l01_validECDSASignature_returnsMagic() public {
+        (address keyedOwner, uint256 pk) = makeAddrAndKey("keyedOwner");
+        uint256 tokenId = 42;
+        nft.mint(keyedOwner, tokenId);
+        ShwounsVault vault = _vaultFor(tokenId);
+
+        bytes32 hash = keccak256("authorize");
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, hash);
+        bytes memory sig = abi.encodePacked(r, s, v); // 65-byte ECDSA signature
+
+        // The bound Noun's owner is a valid signer -> magic value.
+        assertEq(vault.isValidSignature(hash, sig), ERC1271_MAGIC, "owner ECDSA sig -> magic");
+
+        // A non-owner's signature is invalid (non-magic), and still does not revert.
+        (, uint256 strangerPk) = makeAddrAndKey("stranger");
+        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(strangerPk, hash);
+        bytes memory strangerSig = abi.encodePacked(r2, s2, v2);
+        assertTrue(vault.isValidSignature(hash, strangerSig) != ERC1271_MAGIC, "non-owner -> non-magic");
+    }
 }

@@ -205,6 +205,10 @@ contract ShwounsVault is
     }
 
     /// @dev ERC-1271 signature validation: ECDSA or smart-contract signatures (v=0).
+    ///      L-01: malformed/short input returns false (the wrapper then returns a non-magic value),
+    ///      never reverts — integrations rely on ERC-1271 returning "invalid", not throwing. This is
+    ///      a deliberate divergence from upstream Tokenbound AccountV3, which read signature[64] and
+    ///      dynamic offsets without bounds checks (this file is a fork).
     function _isValidSignature(bytes32 hash, bytes calldata signature)
         internal
         view
@@ -212,16 +216,22 @@ contract ShwounsVault is
         override
         returns (bool)
     {
+        // Need at least 65 bytes before reading signature[64].
+        if (signature.length < 65) return false;
+
         // Smart-contract signature: v == 0 encodes (signer in r, sig offset in s)
         uint8 v = uint8(signature[64]);
         address signer;
 
         if (v == 0) {
             signer = address(uint160(uint256(bytes32(signature[:32]))));
+            // The embedded offset must be in-bounds before slicing, else treat as invalid.
+            uint256 offset = uint256(bytes32(signature[32:64]));
+            if (offset > signature.length) return false;
             if (!_isValidSigner(signer, "") && signer != address(this)) {
                 return false;
             }
-            bytes calldata _signature = signature[uint256(bytes32(signature[32:64])):];
+            bytes calldata _signature = signature[offset:];
             return SignatureChecker.isValidERC1271SignatureNow(signer, hash, _signature);
         }
 

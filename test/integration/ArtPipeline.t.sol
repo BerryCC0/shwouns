@@ -9,6 +9,7 @@ import {ShwounsArt} from "../../src/token/ShwounsArt.sol";
 import {ShwounsDescriptor} from "../../src/token/ShwounsDescriptor.sol";
 import {IShwounsArt} from "../../src/interfaces/IShwounsArt.sol";
 import {ISVGRenderer} from "../../src/interfaces/ISVGRenderer.sol";
+import {IInflator} from "../../src/interfaces/IInflator.sol";
 import {IShwounsDescriptorMinimal} from "../../src/interfaces/IShwounsDescriptorMinimal.sol";
 
 /// @notice Exercises the full art stack deployed by Bootstrap (without finalize, so the registry is
@@ -115,5 +116,21 @@ contract ArtPipelineTest is Test {
         vm.prank(owner);
         vm.expectRevert("Parts are locked");
         descriptor.addBackground("000000");
+    }
+
+    /// M-06: after lockParts(), the Art descriptor/inflator handoff is ALSO blocked — otherwise the
+    /// owner could route Art authority to a fresh unlocked descriptor and mutate palettes/traits,
+    /// bypassing the lock.
+    function test_m06_artAuthorityHandoff_blockedAfterLockParts() public {
+        vm.prank(owner);
+        descriptor.lockParts();
+
+        vm.prank(owner);
+        vm.expectRevert("Parts are locked");
+        descriptor.setArtDescriptor(makeAddr("newDescriptor"));
+
+        vm.prank(owner);
+        vm.expectRevert("Parts are locked");
+        descriptor.setArtInflator(IInflator(makeAddr("newInflator")));
     }
 }

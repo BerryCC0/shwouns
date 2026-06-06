@@ -52,11 +52,14 @@ contract ShwounsDescriptor is IShwounsDescriptor, GovernedOwnable {
         emit RendererUpdated(_renderer);
     }
 
-    function setArtDescriptor(address descriptor) external onlyOwner {
+    /// @dev M-06: gated by whenPartsNotLocked. Without it, after lockParts() the owner could hand
+    ///      Art authority to a fresh unlocked descriptor and mutate palettes/traits — bypassing the
+    ///      lock. Authority-changing Art ops must respect the parts lock.
+    function setArtDescriptor(address descriptor) external onlyOwner whenPartsNotLocked {
         art.setDescriptor(descriptor);
     }
 
-    function setArtInflator(IInflator inflator) external onlyOwner {
+    function setArtInflator(IInflator inflator) external onlyOwner whenPartsNotLocked {
         art.setInflator(inflator);
     }
 
