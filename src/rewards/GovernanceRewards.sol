@@ -69,10 +69,24 @@ contract GovernanceRewards is GovernedOwnable, ERC721Holder, ERC1155Holder {
     // Per-proposal reward bookkeeping
     // -------------------------------------------------------------------------
 
-    /// @notice ETH set aside for a given proposal's voter rewards.
+    /// @notice ETH set aside for a given proposal's voter rewards (the original pool, for pro-rata).
     mapping(uint256 => uint256) public proposalRewardPool;
-    /// @notice Per-(proposal, voter) claimed flag.
+    /// @notice Unclaimed remainder of a proposal's pool (decremented as voters claim). M-01.
+    mapping(uint256 => uint256) public remainingRewardPool;
+    /// @notice Sum of all unclaimed allocations across proposals — funds that are RESERVED and may
+    ///         not be re-allocated, gas-refunded, or swept. M-01.
+    uint256 public totalReserved;
+    /// @notice Per-(proposal, voter) claimed flag (stops one voter claiming twice via two NFTs).
     mapping(uint256 => mapping(address => bool)) public voterClaimed;
+    /// @notice Per-(proposal, giTokenId) claimed flag (H-03: stops one approved NFT, passed
+    ///         hand-to-hand, from authorizing many voters). Both flags are checked AND set.
+    mapping(uint256 => mapping(uint256 => bool)) public claimedByTokenId;
+    /// @notice Per-proposal claim deadline (block.timestamp). After it, claims revert and the
+    ///         unclaimed remainder can be released permissionlessly.
+    mapping(uint256 => uint256) public rewardDeadline;
+
+    /// @notice How long after allocation voters may claim. Settled at 180 days.
+    uint256 public constant CLAIM_PERIOD = 180 days;
 
     /// @notice Total ETH ever received via deposit() / receive() / NFT mint forwarding.
     uint256 public lifetimeETHReceived;
@@ -97,6 +111,7 @@ contract GovernanceRewards is GovernedOwnable, ERC721Holder, ERC1155Holder {
     event ProposalRewardAllocated(uint256 indexed proposalId, uint256 amount);
     event VoterRewardClaimed(uint256 indexed proposalId, address indexed voter, uint256 indexed giTokenId, uint256 amount);
     event GasRefunded(address indexed voter, uint256 amount, bool sent);
+    event RewardRemainderReleased(uint256 indexed proposalId, uint256 amount);
 
     // -------------------------------------------------------------------------
     // Errors
@@ -110,7 +125,11 @@ contract GovernanceRewards is GovernedOwnable, ERC721Holder, ERC1155Holder {
     error DidNotVote();
     error AbstainNotEligible();
     error AlreadyClaimed();
+    error AlreadyClaimedByTokenId();
     error NoVotesYet();
+    error RewardClaimExpired();
+    error RewardClaimNotExpired();
+    error ExceedsUnreserved();
 
     modifier onlyDAO() {
         if (msg.sender != address(dao)) revert NotDAO();
@@ -172,13 +191,18 @@ contract GovernanceRewards is GovernedOwnable, ERC721Holder, ERC1155Holder {
     // -------------------------------------------------------------------------
 
     /// @notice Set aside `proposalRewardAmount` ETH for the given proposal's voter rewards.
-    ///         Called by DAOLogic inside finalize(). If GR's balance is insufficient,
-    ///         allocates whatever's available (could be 0 — no rewards for that proposal).
+    ///         Called by DAOLogic inside finalize(). M-01: allocates against UNRESERVED balance
+    ///         (balance - totalReserved) so pools can never collectively exceed the contract's ETH;
+    ///         the allocation is reserved and a 180-day claim deadline is set.
     function allocateProposalReward(uint256 proposalId) external onlyDAO {
+        uint256 bal = address(this).balance;
+        uint256 unreserved = bal > totalReserved ? bal - totalReserved : 0;
         uint256 desired = proposalRewardAmount;
-        uint256 available = address(this).balance;
-        uint256 allocated = desired < available ? desired : available;
+        uint256 allocated = desired < unreserved ? desired : unreserved;
         proposalRewardPool[proposalId] = allocated;
+        remainingRewardPool[proposalId] = allocated;
+        totalReserved += allocated;
+        rewardDeadline[proposalId] = block.timestamp + CLAIM_PERIOD;
         emit ProposalRewardAllocated(proposalId, allocated);
     }
 
@@ -189,7 +213,9 @@ contract GovernanceRewards is GovernedOwnable, ERC721Holder, ERC1155Holder {
     /// @notice Claim your pro-rata voter reward for a proposal. You must hold an approved
     ///         GI NFT (passed as giTokenId) and have voted For or Against on the proposal.
     function claimVotingReward(uint256 proposalId, uint256 giTokenId) external {
-        if (voterClaimed[proposalId][msg.sender]) revert AlreadyClaimed();
+        if (block.timestamp > rewardDeadline[proposalId]) revert RewardClaimExpired();
+        if (voterClaimed[proposalId][msg.sender]) revert AlreadyClaimed(); // one claim per voter
+        if (claimedByTokenId[proposalId][giTokenId]) revert AlreadyClaimedByTokenId(); // H-03
         if (!approvalRegistry.isEligible(msg.sender, giTokenId)) revert NotEligible();
 
         (bool hasVoted, uint8 support, uint96 votes) = dao.getReceiptUnpacked(proposalId, msg.sender);
@@ -200,15 +226,35 @@ contract GovernanceRewards is GovernedOwnable, ERC721Holder, ERC1155Holder {
         uint256 totalEligibleVotes = forVotes + againstVotes;
         if (totalEligibleVotes == 0) revert NoVotesYet();
 
-        uint256 pool = proposalRewardPool[proposalId];
-        uint256 share = (pool * votes) / totalEligibleVotes;
+        uint256 share = (proposalRewardPool[proposalId] * votes) / totalEligibleVotes;
+        uint256 remaining = remainingRewardPool[proposalId];
+        if (share > remaining) share = remaining; // never pay beyond what's left in the pool
 
+        // H-03: set BOTH flags. The token flag stops one NFT authorizing many voters; the voter
+        // flag stops one voter claiming twice via multiple approved NFTs.
         voterClaimed[proposalId][msg.sender] = true;
+        claimedByTokenId[proposalId][giTokenId] = true;
+
         if (share > 0) {
+            // M-01: decrement the proposal's remainder AND the global reservation by the paid share.
+            remainingRewardPool[proposalId] = remaining - share;
+            totalReserved -= share;
             (bool ok, ) = msg.sender.call{value: share}("");
             require(ok, "ETH transfer failed");
         }
         emit VoterRewardClaimed(proposalId, msg.sender, giTokenId, share);
+    }
+
+    /// @notice After a proposal's 180-day claim deadline, permissionlessly release its UNCLAIMED
+    ///         remainder back to unreserved balance (pro-rata pools are rarely fully claimed; this
+    ///         avoids locking reserved-unclaimed ETH behind an owner who may never act). M-01.
+    function releaseExpiredRewardRemainder(uint256 proposalId) external {
+        if (block.timestamp <= rewardDeadline[proposalId]) revert RewardClaimNotExpired();
+        uint256 remaining = remainingRewardPool[proposalId];
+        if (remaining == 0) return;
+        remainingRewardPool[proposalId] = 0;
+        totalReserved -= remaining;
+        emit RewardRemainderReleased(proposalId, remaining);
     }
 
     // -------------------------------------------------------------------------
@@ -222,8 +268,10 @@ contract GovernanceRewards is GovernedOwnable, ERC721Holder, ERC1155Holder {
     function refundGas(address voter, uint256 amount) external onlyDAO {
         uint256 cap = maxRefundPerVote;
         uint256 toSend = amount < cap ? amount : cap;
-        uint256 available = address(this).balance;
-        if (toSend > available) toSend = available;
+        // M-01: gas refunds come only from UNRESERVED balance — never from reserved reward pools.
+        uint256 bal = address(this).balance;
+        uint256 unreserved = bal > totalReserved ? bal - totalReserved : 0;
+        if (toSend > unreserved) toSend = unreserved;
         if (toSend == 0) {
             emit GasRefunded(voter, 0, false);
             return;
@@ -256,6 +304,10 @@ contract GovernanceRewards is GovernedOwnable, ERC721Holder, ERC1155Holder {
     // -------------------------------------------------------------------------
 
     function sweepETH(address payable to, uint256 amount) external onlyOwner {
+        // M-01: sweeps may only touch UNRESERVED balance — reserved reward pools stay claimable.
+        uint256 bal = address(this).balance;
+        uint256 unreserved = bal > totalReserved ? bal - totalReserved : 0;
+        if (amount > unreserved) revert ExceedsUnreserved();
         (bool ok, ) = to.call{value: amount}('');
         require(ok, 'ETH sweep failed');
         emit ETHSwept(to, amount);

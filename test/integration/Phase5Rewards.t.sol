@@ -429,4 +429,72 @@ contract Phase5RewardsTest is Test {
         assertFalse(approvalRegistry.isEligible(alice, aliceGI));
         assertTrue(approvalRegistry.isEligible(makeAddr("newOwner"), aliceGI));
     }
+
+    // =========================================================================
+    // §D rewards accounting (H-03 second flag, M-01 reservation/deadline)
+    // =========================================================================
+
+    /// H-03: a voter holding TWO approved NFTs can still claim only once for a proposal (the
+    /// per-voter flag stops a second claim via a different approved NFT).
+    function test_h03_voterWithTwoApprovedNFTs_claimsOnce() public {
+        uint256 secondGI = _mintGI(alice);
+        approvalRegistry.approve(secondGI);
+
+        uint256 pid = _runProposalToCollected(4 ether, makeAddr("recip"));
+        dao.finalize(pid);
+
+        vm.prank(alice);
+        rewards.claimVotingReward(pid, aliceGI);
+
+        vm.prank(alice);
+        vm.expectRevert(GovernanceRewards.AlreadyClaimed.selector);
+        rewards.claimVotingReward(pid, secondGI);
+    }
+
+    /// M-01: sweepETH can only touch UNRESERVED balance; the reserved pool stays claimable.
+    function test_m01_sweepETH_cannotTouchReservedPool() public {
+        uint256 pid = _runProposalToCollected(4 ether, makeAddr("recip"));
+        dao.finalize(pid); // reserves 0.1 ether for the pool
+        uint256 reserved = rewards.totalReserved();
+        assertEq(reserved, 0.1 ether);
+
+        uint256 unreserved = address(rewards).balance - reserved;
+        vm.expectRevert(GovernanceRewards.ExceedsUnreserved.selector);
+        rewards.sweepETH(payable(makeAddr("sink")), unreserved + 1);
+
+        rewards.sweepETH(payable(makeAddr("sink")), unreserved);
+        assertEq(address(rewards).balance, reserved, "only the reserved pool remains");
+
+        // The reserved pool is still claimable after the sweep.
+        uint256 aBefore = alice.balance;
+        vm.prank(alice);
+        rewards.claimVotingReward(pid, aliceGI);
+        assertEq(alice.balance - aBefore, 0.025 ether, "reserved pool still claimable");
+    }
+
+    /// M-01: pools are claimable until the 180-day deadline; after it, claims revert and the
+    /// unclaimed remainder is permissionlessly releasable back to unreserved.
+    function test_m01_deadline_thenPermissionlessRemainderRelease() public {
+        uint256 pid = _runProposalToCollected(4 ether, makeAddr("recip"));
+        dao.finalize(pid);
+
+        vm.prank(alice);
+        rewards.claimVotingReward(pid, aliceGI); // 0.025 of 0.1
+        uint256 remaining = rewards.remainingRewardPool(pid);
+        assertEq(remaining, 0.075 ether);
+
+        vm.warp(block.timestamp + rewards.CLAIM_PERIOD() + 1);
+
+        // bob's claim is now expired.
+        vm.prank(bob);
+        vm.expectRevert(GovernanceRewards.RewardClaimExpired.selector);
+        rewards.claimVotingReward(pid, bobGI);
+
+        // Anyone can release the unclaimed remainder back to unreserved.
+        uint256 reservedBefore = rewards.totalReserved();
+        vm.prank(makeAddr("anyone"));
+        rewards.releaseExpiredRewardRemainder(pid);
+        assertEq(rewards.remainingRewardPool(pid), 0, "remainder released");
+        assertEq(rewards.totalReserved(), reservedBefore - remaining, "reservation freed");
+    }
 }

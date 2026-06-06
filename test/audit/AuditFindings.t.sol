@@ -244,13 +244,18 @@ contract AuditFindingsTest is LifecycleInvariantsTest {
 
         vm.prank(alice);
         rewards.claimVotingReward(proposalId, giTokenId);
+
+        // H-03 (FIXED — regression). Transfer the approved NFT to bob and re-claim with the SAME
+        // tokenId: it reverts. One approved NFT authorizes exactly one claim per proposal.
         vm.prank(alice);
         giNFT.transferFrom(alice, bob, giTokenId);
         vm.prank(bob);
+        vm.expectRevert(GovernanceRewards.AlreadyClaimedByTokenId.selector);
         rewards.claimVotingReward(proposalId, giTokenId);
 
-        assertTrue(rewards.voterClaimed(proposalId, alice));
-        assertTrue(rewards.voterClaimed(proposalId, bob));
+        assertTrue(rewards.voterClaimed(proposalId, alice), "alice claimed");
+        assertFalse(rewards.voterClaimed(proposalId, bob), "bob could NOT claim with the reused NFT");
+        assertTrue(rewards.claimedByTokenId(proposalId, giTokenId), "token marked claimed");
     }
 
     function test_audit_rewardPoolsCanBeAllocatedBeyondContractBalance() public {
@@ -261,9 +266,16 @@ contract AuditFindingsTest is LifecycleInvariantsTest {
         rewards.allocateProposalReward(1);
         rewards.allocateProposalReward(2);
 
-        assertEq(rewards.proposalRewardPool(1), 0.1 ether);
-        assertEq(rewards.proposalRewardPool(2), 0.1 ether);
-        assertEq(address(rewards).balance, 0.1 ether);
-        assertGt(rewards.proposalRewardPool(1) + rewards.proposalRewardPool(2), address(rewards).balance);
+        // M-01 (FIXED — regression). Allocations reserve against UNRESERVED balance, so the second
+        // can't exceed what's left: pool(1)=0.1 (full), pool(2)=0. Pools never collectively exceed
+        // the contract balance.
+        assertEq(rewards.proposalRewardPool(1), 0.1 ether, "first pool fully funded");
+        assertEq(rewards.proposalRewardPool(2), 0, "second allocation capped at unreserved (0)");
+        assertEq(rewards.totalReserved(), 0.1 ether, "reserved == funded");
+        assertLe(
+            rewards.proposalRewardPool(1) + rewards.proposalRewardPool(2),
+            address(rewards).balance,
+            "pools never exceed balance"
+        );
     }
 }
