@@ -339,16 +339,15 @@ contract DAORefundStuckTest is DAOTestBase {
 
         assertEq(dao.escrowAddressOf(pid).balance, 5 ether, "escrow holds the collected 5 ETH");
 
-        // Refund — proportional to the snapshot, returns ETH to current owners
-        address[] memory assets = new address[](1);
-        assets[0] = address(0);
+        // Refund — by actual contribution, returns ETH to current owners (paged batch)
         uint256 aliceBefore = alice.balance;
         uint256 bobBefore = bob.balance;
         uint256 carolBefore = carol.balance;
 
-        dao.refundStuckProposal(pid, assets);
+        dao.refundStuckProposal(pid, 100);
 
-        // Pro-rata: alice 5*3/10=1.5, bob 5*5/10=2.5, carol 5*2/10=1.0
+        // All three contributed their full share (no drain), so actual == snapshot share:
+        // alice 5*3/10=1.5, bob 5*5/10=2.5, carol 5*2/10=1.0
         assertEq(alice.balance - aliceBefore, 1.5 ether);
         assertEq(bob.balance - bobBefore, 2.5 ether);
         assertEq(carol.balance - carolBefore, 1.0 ether);
@@ -879,5 +878,84 @@ contract DAOSnapshotPagingTest is DAOTestBase {
         (progress, ) = dao.snapshotProgress(pid);
         assertEq(progress, 3);
         assertEq(uint256(dao.state(pid)), uint256(ShwounsDAOTypes.ProposalState.Snapshotted));
+    }
+}
+
+// =============================================================================
+// §C lifecycle recovery (H-01, M-03) — cancel/veto of funded proposals refund contributors
+// =============================================================================
+
+contract DAORecoveryTest is DAOTestBase {
+    function setUp() public {
+        _deploy(1, 7200); // vetoer = this test contract (see DAOTestBase._deploy)
+    }
+
+    function _passAndCollect(uint256 amount) internal returns (uint256 pid) {
+        (address[] memory t, uint256[] memory v, string[] memory s, bytes[] memory c) =
+            _simpleETHProposal(amount, makeAddr("r"));
+        vm.prank(alice);
+        pid = dao.propose(t, v, s, c, "recover");
+        vm.roll(block.number + 2);
+        vm.prank(alice); dao.castVote(pid, 1);
+        vm.prank(bob); dao.castVote(pid, 1);
+        vm.prank(carol); dao.castVote(pid, 1);
+        vm.roll(block.number + 7201);
+        dao.queue(pid);
+        dao.recordSnapshot(pid, 10);
+        dao.collect(pid, 10);
+    }
+
+    /// H-01: the vetoer can veto a fully-collected proposal (emergency brake stays available), and
+    /// the funds are then recoverable to contributors by actual contribution (M-03).
+    function test_h01_vetoFundedProposal_refundsContributors() public {
+        uint256 pid = _passAndCollect(6 ether);
+        assertEq(dao.escrowAddressOf(pid).balance, 6 ether);
+
+        dao.veto(pid); // this contract is the vetoer
+        assertEq(uint256(dao.state(pid)), uint256(ShwounsDAOTypes.ProposalState.Vetoed));
+
+        uint256 a = alice.balance;
+        uint256 b = bob.balance;
+        uint256 cb = carol.balance;
+        dao.refund(pid, 100); // permissionless
+        assertEq(dao.escrowAddressOf(pid).balance, 0, "escrow fully refunded");
+        // shares of 6 from total 10: alice 1.8, bob 3.0, carol 1.2
+        assertEq(alice.balance - a, 1.8 ether);
+        assertEq(bob.balance - b, 3 ether);
+        assertEq(carol.balance - cb, 1.2 ether);
+
+        // No double refund.
+        vm.expectRevert(ShwounsDAOProposals.AlreadyRefunded.selector);
+        dao.refund(pid, 100);
+    }
+
+    /// The refund pages across bounded calls; the cursor advances one vault per batch.
+    function test_h01_refund_pagesAcrossCalls() public {
+        uint256 pid = _passAndCollect(6 ether);
+        vm.prank(alice); dao.cancel(pid); // proposer cancels a funded proposal (allowed; H-01)
+        assertEq(uint256(dao.state(pid)), uint256(ShwounsDAOTypes.ProposalState.Canceled));
+
+        address escrow = dao.escrowAddressOf(pid);
+        // Batch of 1 → refunds one vault (alice, index 0): 6*3/10 = 1.8.
+        dao.refund(pid, 1);
+        assertEq(escrow.balance, 4.2 ether, "after 1 vault");
+        dao.refund(pid, 1); // bob: 3.0
+        assertEq(escrow.balance, 1.2 ether, "after 2 vaults");
+        dao.refund(pid, 1); // carol: 1.2 → complete
+        assertEq(escrow.balance, 0, "fully refunded across pages");
+
+        vm.expectRevert(ShwounsDAOProposals.AlreadyRefunded.selector);
+        dao.refund(pid, 1);
+    }
+
+    /// finalize is unavailable once a refund has begun (review §3).
+    function test_h01_finalizeBlockedOnceRefundStarted() public {
+        uint256 pid = _passAndCollect(6 ether);
+        vm.prank(alice); dao.cancel(pid);
+        dao.refund(pid, 1); // start (and here finish — only 3 vaults, but begun regardless)
+        // The proposal is Canceled, so finalize reverts on state anyway; the refundStarted guard
+        // additionally blocks a Collected proposal mid-refund. Assert finalize is not possible.
+        vm.expectRevert();
+        dao.finalize(pid);
     }
 }

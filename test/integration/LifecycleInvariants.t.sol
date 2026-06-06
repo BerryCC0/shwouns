@@ -324,36 +324,34 @@ contract LifecycleInvariantsTest is Test {
         assertEq(_escrowBal(pidB), 0, "B's escrow drained");
     }
 
-    /// refundStuckProposal returns ONLY what was actually collected (pro-rata by snapshot share),
-    /// never the snapshot-derived requested amount (which would exceed the DAO's holdings).
-    function test_c4_refundStuckProposal_returnsOnlyCollected() public {
+    /// refundStuckProposal returns each vault's ACTUAL contribution (M-03), never a snapshot-share
+    /// approximation: a vault drained before collect contributed nothing and gets nothing — no
+    /// cross-subsidy — while the others are made whole.
+    function test_c4_refundStuckProposal_returnsActualContribution() public {
         uint256 pid = _proposeETH(alice, recipientA, 6 ether);
         _passToSucceeded(pid);
         dao.queue(pid);
         dao.recordSnapshot(pid, 10); // snapshots all three: total 10 ETH
 
-        // Alice drains after snapshot → her share can't be collected (genuine shortfall).
+        // Alice drains after snapshot → she contributes 0 at collect (genuine shortfall).
         vm.prank(alice);
         aliceVault.withdraw(alice, 3 ether);
 
         dao.collect(pid, 10);
         // Collected = bob 3 + carol 1.2 = 4.2 (alice 0). NOT the requested 6.
-        uint256 collected = _escrowBal(pid);
-        assertEq(collected, 4.2 ether, "escrow holds only bob+carol shares");
+        assertEq(_escrowBal(pid), 4.2 ether, "escrow holds only bob+carol contributions");
 
         uint256 aliceBefore = alice.balance;
         uint256 bobBefore = bob.balance;
         uint256 carolBefore = carol.balance;
 
-        address[] memory assets = new address[](1);
-        assets[0] = address(0);
-        dao.refundStuckProposal(pid, assets);
+        dao.refundStuckProposal(pid, 100); // admin path (Collected); paged batch covers all
 
-        // The escrow can only refund what it holds: total refunded == collected (4.2), distributed
-        // pro-rata by snapshot share (alice 3/10, bob 5/10, carol 2/10 of 4.2).
+        // M-03: refunded by ACTUAL contribution — alice 0 (drained), bob 3, carol 1.2. The drained
+        // vault gets NO cross-subsidy from the others.
         assertEq(_escrowBal(pid), 0, "escrow emptied, never over-refunded");
-        assertEq(alice.balance - aliceBefore, 4.2 ether * 3 / 10, "alice owner share of collected");
-        assertEq(bob.balance - bobBefore, 4.2 ether * 5 / 10, "bob owner share of collected");
-        assertEq(carol.balance - carolBefore, 4.2 ether * 2 / 10, "carol owner share of collected");
+        assertEq(alice.balance - aliceBefore, 0, "alice contributed nothing -> refunded nothing");
+        assertEq(bob.balance - bobBefore, 3 ether, "bob refunded his actual contribution");
+        assertEq(carol.balance - carolBefore, 1.2 ether, "carol refunded her actual contribution");
     }
 }

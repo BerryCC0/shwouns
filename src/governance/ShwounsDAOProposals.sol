@@ -414,18 +414,18 @@ library ShwounsDAOProposals {
 
     function cancel(ShwounsDAOTypes.Storage storage ds, uint256 proposalId) external {
         ShwounsDAOTypes.ProposalState s = state(ds, proposalId);
-        // Cannot cancel at a terminal state, nor once funds have been collected into the DAO
-        // (a stuck Collected proposal is unwound via refundStuckProposal, not cancel), nor while
-        // the proposal is Executing — a reentrant callback could otherwise satisfy the cancel
-        // threshold mid-finalize and write a contradictory terminal flag (review §6/§7).
+        // H-01: cancel is NOT blocked after funds move — a funded Canceled proposal routes into the
+        // contribution refund path (refund()), so funds are never stranded. Cancel is rejected only
+        // at a terminal state and while the proposal is Executing (a reentrant callback could
+        // otherwise satisfy the cancel threshold mid-finalize and write a contradictory flag —
+        // review §6/§7).
         if (
             s == ShwounsDAOTypes.ProposalState.Canceled ||
             s == ShwounsDAOTypes.ProposalState.Defeated ||
             s == ShwounsDAOTypes.ProposalState.Expired ||
             s == ShwounsDAOTypes.ProposalState.Executed ||
             s == ShwounsDAOTypes.ProposalState.Vetoed ||
-            s == ShwounsDAOTypes.ProposalState.Executing ||
-            s == ShwounsDAOTypes.ProposalState.Collected
+            s == ShwounsDAOTypes.ProposalState.Executing
         ) revert InvalidProposalState();
 
         ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
@@ -768,6 +768,7 @@ library ShwounsDAOProposals {
             uint256 received =
                 (asset == address(0) ? escrow.balance : IERC20(asset).balanceOf(escrow)) - balBefore;
             ss.collected[asset] += received; // C4: per-proposal ledger (isolates this proposal's funds)
+            ss.pulled[shwounId][asset] += received; // M-03: per-vault actual contribution (for refunds)
             emit AssetCollectedFromVault(proposalId, shwounId, asset, received);
         }
     }
@@ -784,6 +785,9 @@ library ShwounsDAOProposals {
         if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Collected) revert InvalidProposalState();
 
         ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
+        // Review §3: finalize is unavailable once the contribution refund has begun (a stuck
+        // Collected proposal being unwound by governance can't also execute).
+        if (ss.refundStarted) revert InvalidProposalState();
         address escrow = escrowAddressOf(ds, proposalId);
 
         // C4 all-or-nothing ledger gate + a solvency recheck against ACTUAL escrow balances
@@ -1290,63 +1294,103 @@ library ShwounsDAOProposals {
     }
 
     // =========================================================================
-    // Refund a stuck proposal — last-resort recovery if finalize() never succeeds
+    // Contribution refund (H-01, M-03) — paged, by ACTUAL per-vault contribution
     // =========================================================================
 
-    event StuckProposalRefunded(uint256 indexed proposalId, address indexed asset, uint256 totalRefunded);
+    event StuckProposalRefunded(uint256 indexed proposalId, address indexed asset, uint256 amount);
+    event ProposalRefundProgress(uint256 indexed proposalId, uint256 refundProgress, uint256 total);
+    event ProposalRefunded(uint256 indexed proposalId);
 
-    /// @notice Distribute the funds the proposal's escrow holds (from collect()) back to the
-    ///         snapshotted vaults' current owners, pro-rata to their snapshot share.
-    /// @dev Only callable from facade via admin path. Marks the proposal as finalized to prevent
-    ///      double-spend. Iterates snapshottedVaults; the per-vault actually-pulled refund + paging
-    ///      redesign (M-03) lands in §C. Here the funds simply come from the per-proposal escrow.
+    error AlreadyRefunded();
+
+    /// @notice Permissionless contribution refund for a funded but DEAD proposal — Canceled or
+    ///         Vetoed (H-01: cancel/veto are never blocked after funds move; the funds route here).
+    ///         Pages over snapshotted vaults, returning each vault's ACTUAL contribution (M-03) to
+    ///         its current owner from the escrow. Permissionless is safe — destinations are derived
+    ///         from on-chain ownership, never the caller. (A Collected proposal whose finalize is
+    ///         stuck uses the admin refundStuckProposal instead, so a live proposal can't be
+    ///         permissionlessly forced into refund.)
+    function refund(
+        ShwounsDAOTypes.Storage storage ds,
+        uint256 proposalId,
+        uint256 batchSize
+    ) external {
+        if (ds.executing) revert AlreadyExecuting();
+        ShwounsDAOTypes.ProposalState s = state(ds, proposalId);
+        if (s != ShwounsDAOTypes.ProposalState.Canceled && s != ShwounsDAOTypes.ProposalState.Vetoed) {
+            revert InvalidProposalState();
+        }
+        _refundPaged(ds, proposalId, batchSize);
+    }
+
+    /// @notice Admin/governance last-resort refund for a Collected proposal whose finalize never
+    ///         succeeds. Same paged, by-actual-contribution mechanics as refund(); kept admin-gated
+    ///         (facade) so a live Collected proposal can't be permissionlessly forced into refund
+    ///         (which would grief its finalize).
     function refundStuckProposal(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
-        address[] calldata assetsToRefund
+        uint256 batchSize
     ) external {
-        // No recovery while a finalize is in flight (review §6 — reject refund globally while the
-        // execution lock is held; the active proposal is itself unreachable here since its state is
-        // Executing, not Collected).
         if (ds.executing) revert AlreadyExecuting();
-        ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
         if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Collected) revert InvalidProposalState();
-
-        address escrow = escrowAddressOf(ds, proposalId);
-        for (uint256 a = 0; a < assetsToRefund.length; a++) {
-            address asset = assetsToRefund[a];
-            uint256 distributed = _refundAsset(ds, ss, escrow, asset);
-            emit StuckProposalRefunded(proposalId, asset, distributed);
-        }
-
-        ss.finalized = true; // mark as terminal — cannot finalize() again
-        ds._proposals[proposalId].executed = true; // surface as Executed in state()
+        _refundPaged(ds, proposalId, batchSize);
     }
 
-    /// @dev Distribute one asset's collected total, pro-rata by snapshot share, to the current Noun
-    ///      owners, paying out of the proposal's escrow. Distributes only what was ACTUALLY
-    ///      collected (never the snapshot-derived requested amount). Zeroes the ledger to bar any
-    ///      double refund. Returns the amount distributed.
-    function _refundAsset(
+    /// @dev Paged refund engine. Returns each snapshotted vault's ACTUAL pulled amount, for every
+    ///      recorded asset (ss.assets — never a caller-supplied list, so no asset is omitted), to
+    ///      its current owner. The cursor advances only after a page's transfers all succeed (a
+    ///      reverted page rolls back atomically and does not advance), and `refunded` is committed
+    ///      only after the FINAL page — so rescue's terminal gate opens only once every contribution
+    ///      has been returned.
+    function _refundPaged(
+        ShwounsDAOTypes.Storage storage ds,
+        uint256 proposalId,
+        uint256 batchSize
+    ) internal {
+        ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
+        if (ss.refunded) revert AlreadyRefunded();
+        ss.refundStarted = true; // H-01: blocks finalize from here on
+
+        address escrow = escrowAddressOf(ds, proposalId);
+        uint256 n = ss.snapshottedVaults.length;
+        uint256 start = ss.refundProgress;
+        uint256 end = start + batchSize;
+        if (end > n) end = n;
+
+        for (uint256 i = start; i < end; i++) {
+            _refundVault(ds, ss, escrow, proposalId, ss.snapshottedVaults[i]);
+        }
+        ss.refundProgress = end;
+        emit ProposalRefundProgress(proposalId, end, n);
+
+        if (end == n) {
+            ss.refunded = true; // terminal — committed only after the final transfer (review §3)
+            ss.finalized = true; // cannot finalize() again; surfaces as Executed for Collected
+            emit ProposalRefunded(proposalId);
+        }
+    }
+
+    /// @dev Refund one vault's actual contribution across every recorded asset, to its current
+    ///      owner, out of the escrow. Zeroes each pulled entry before transfer so a re-page cannot
+    ///      double-refund (and a revert rolls the zeroing back atomically).
+    function _refundVault(
         ShwounsDAOTypes.Storage storage ds,
         ShwounsDAOTypes.SnapshotState storage ss,
         address escrow,
-        address asset
-    ) internal returns (uint256 distributed) {
-        uint256 total = ss.totalSnapshotBalance[asset];
-        uint256 collectedTotal = ss.collected[asset];
-        if (total == 0 || collectedTotal == 0) return 0;
-        uint256 vaultCount = ss.snapshottedVaults.length;
-        for (uint256 i = 0; i < vaultCount; i++) {
-            uint256 shwounId = ss.snapshottedVaults[i];
-            uint256 snap = ss.vaultSnapshot[shwounId][asset];
-            if (snap == 0) continue;
-            uint256 share = (collectedTotal * snap) / total;
-            if (share == 0) continue;
-            IProposalEscrow(escrow).payOut(asset, ds.shwouns.ownerOf(shwounId), share);
-            distributed += share;
+        uint256 proposalId,
+        uint256 shwounId
+    ) internal {
+        address shwounOwner = ds.shwouns.ownerOf(shwounId);
+        uint256 assetCount = ss.assets.length;
+        for (uint256 j = 0; j < assetCount; j++) {
+            address asset = ss.assets[j];
+            uint256 amt = ss.pulled[shwounId][asset];
+            if (amt == 0) continue;
+            ss.pulled[shwounId][asset] = 0;
+            IProposalEscrow(escrow).payOut(asset, shwounOwner, amt);
+            emit StuckProposalRefunded(proposalId, asset, amt);
         }
-        ss.collected[asset] = 0; // drained — prevent any double refund
     }
 
     // =========================================================================
@@ -1375,7 +1419,13 @@ library ShwounsDAOProposals {
         uint256 amount
     ) external {
         if (ds.executing) revert AlreadyExecuting(); // no recovery while a finalize is in flight
-        if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Executed) revert NotTerminal();
+        // Terminal gate (review §8): a successful finalize committed Executed, OR the paged refund
+        // committed completion (`refunded`). For a Canceled/Vetoed-then-refunded proposal, state()
+        // still surfaces Canceled/Vetoed, so the refunded flag is the terminal signal.
+        if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Executed
+            && !ds._snapshotState[proposalId].refunded) {
+            revert NotTerminal();
+        }
 
         // Recompute the escrow address and verify its codehash (review §8): only a genuine clone at
         // the predicted address is driven.

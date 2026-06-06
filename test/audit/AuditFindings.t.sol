@@ -94,25 +94,24 @@ contract AuditFindingsTest is LifecycleInvariantsTest {
         _passToSucceeded(proposalId);
         dao.queue(proposalId);
         dao.recordSnapshot(proposalId, 100);
+        // Collect only the first snapshotted vault (alice's) — a partial collection.
         dao.collect(proposalId, 1);
+        uint256 collected = _escrowBal(proposalId);
+        assertGt(collected, 0, "partial collection sits in the escrow");
 
-        // Funds collected so far now sit in the proposal's escrow (per-proposal custody).
-        uint256 stranded = _escrowBal(proposalId);
-        assertGt(stranded, 0);
-
+        // H-01 (FIXED — regression). Cancel is allowed even after funds moved; the funded Canceled
+        // proposal routes into the permissionless contribution refund — nothing is stranded.
         vm.prank(alice);
         dao.cancel(proposalId);
         assertEq(uint256(dao.state(proposalId)), uint256(ShwounsDAOTypes.ProposalState.Canceled));
 
-        // BUG still present pre-§C: a Canceled proposal can't be refunded (refundStuckProposal
-        // requires Collected), so the partial collection is stranded in the escrow. §C (Phase 4)
-        // routes funded Canceled/Vetoed proposals into the refund path and flips this assertion to
-        // "fully recoverable".
-        address[] memory assets = new address[](1);
-        assets[0] = address(0);
-        vm.expectRevert();
-        dao.refundStuckProposal(proposalId, assets);
-        assertEq(_escrowBal(proposalId), stranded);
+        uint256 aliceBefore = alice.balance;
+        vm.prank(makeAddr("anyone")); // permissionless: anyone can trigger recovery for contributors
+        dao.refund(proposalId, 100);
+
+        assertEq(_escrowBal(proposalId), 0, "fully recovered - nothing stranded");
+        // Only the collected vault (alice's) contributed; alice (its owner) is made whole.
+        assertEq(alice.balance - aliceBefore, collected, "contributor refunded actual contribution");
     }
 
     function test_audit_approvalActionDrainsAnotherProposalsERC20() public {

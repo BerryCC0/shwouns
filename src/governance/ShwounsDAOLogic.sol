@@ -696,11 +696,16 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
     ///         not to vaults — recovered ETH+ERC20s go to the owners directly.
     /// @dev Only callable by admin (typically DAOLogic itself via another proposal's
     ///      finalize). The stuck-proposal must be in Collected state.
-    function refundStuckProposal(uint256 proposalId, address[] calldata assetsToRefund)
-        external
-        onlyAdmin
-    {
-        ds.refundStuckProposal(proposalId, assetsToRefund);
+    /// @notice Admin/governance last-resort refund for a Collected proposal whose finalize never
+    ///         succeeds. Paged; returns each vault's ACTUAL contribution (M-03) to its current owner.
+    function refundStuckProposal(uint256 proposalId, uint256 batchSize) external onlyAdmin {
+        ds.refundStuckProposal(proposalId, batchSize);
+    }
+
+    /// @notice Permissionless contribution refund for a funded Canceled or Vetoed proposal (H-01).
+    ///         Returns each snapshotted vault's actual contribution to its current owner; paged.
+    function refund(uint256 proposalId, uint256 batchSize) external {
+        ds.refund(proposalId, batchSize);
     }
 
     /// @notice Recover stray residual assets from a TERMINAL proposal's escrow to the immutable

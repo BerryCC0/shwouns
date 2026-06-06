@@ -249,6 +249,19 @@ interface ShwounsDAOTypes {
         ///         freezeProgress == snapshotTargetCount. Sound because the active set is
         ///         append-only (M-02): indices [0, snapshotTargetCount) never shift.
         uint256 freezeProgress;
+        // -- Appended for the §C refund redesign (H-01, M-03; append-only; do not reorder) --
+        /// @notice M-03: actually-pulled amount per (vault, asset), recorded during collect. The
+        ///         refund path returns EXACTLY these amounts to each contributing vault's current
+        ///         owner — never a snapshot-share approximation — so a vault drained before collect
+        ///         gets no cross-subsidy and no collected asset can be omitted.
+        mapping(uint256 => mapping(address => uint256)) pulled;
+        /// @notice H-01: true once the contribution refund has begun. Blocks finalize.
+        bool refundStarted;
+        /// @notice Paged refund cursor over snapshottedVaults.
+        uint256 refundProgress;
+        /// @notice True once every recorded contribution has been refunded (terminal — enables the
+        ///         terminal-gated residual rescue, and surfaces as Executed/Refunded completion).
+        bool refunded;
     }
 
     struct Receipt {
