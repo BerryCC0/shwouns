@@ -3,11 +3,14 @@
 /// @title Shwouns DAO Proposals library
 ///
 /// @notice Forked from NounsDAOProposals.sol. The propose/vote/state/cancel lifecycle
-///         mostly mirrors V4. The novel parts are queue → recordSnapshot → collect →
-///         finalize, which replace V4's timelock-based execute.
+///         mirrors V4. The novel parts are queue → recordSnapshot → collect → finalize,
+///         which replace V4's timelock-based execute, with per-proposal fund isolation.
 ///
-/// @dev MVP scope. Deferred from upstream: proposeBySigs, updateProposal, refundable
-///      votes, candidates, objection period. Will be added in follow-up turns.
+/// @dev Brought to NounsDAOLogicV4 parity (minus the intentional treasury/timelock/fork
+///      removals and client-ID attribution): signed proposals (per-signer EIP-712 digest +
+///      ERC-1271), refundable votes, candidates, objection period, dynamic quorum, and
+///      vote-by-signature are all implemented and hardened. Remaining upstream parity item:
+///      proposal editing (the Updatable window).
 
 pragma solidity ^0.8.19;
 
@@ -16,6 +19,7 @@ import { IShwounsVaultRegistry } from "../vault/IShwounsVaultRegistry.sol";
 import { ShwounsVault } from "../vault/ShwounsVault.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import { SignatureChecker } from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 
 library ShwounsDAOProposals {
     /// @dev The 4-byte selector for ERC-20 transfer(address,uint256). Used to detect
@@ -45,6 +49,8 @@ library ShwounsDAOProposals {
     error CollectPhaseNotComplete();
     error VaultAlreadyCollected();
     error VaultNotSnapshotted();
+    error InsufficientCollected();
+    error InvalidTopUp();
     error NotShwounsHolder();
     error OnlyProposerOrVetoer();
     error OnlyVetoer();
@@ -127,7 +133,9 @@ library ShwounsDAOProposals {
 
         uint256 totalSupply = ds.shwouns.totalSupply();
         uint256 threshold = bps2Uint(ds.proposalThresholdBPS, totalSupply);
-        if (ds.shwouns.getPriorVotes(msg.sender, block.number - 1) < threshold) {
+        // Strictly greater than the threshold, matching Nouns (votes <= threshold reverts). With
+        // `<` a threshold that rounds to 0 at low supply would let a zero-vote address propose.
+        if (ds.shwouns.getPriorVotes(msg.sender, block.number - 1) <= threshold) {
             revert ProposerVotesBelowThreshold();
         }
     }
@@ -136,8 +144,12 @@ library ShwounsDAOProposals {
         uint256 latestProposalId = ds.latestProposalIds[msg.sender];
         if (latestProposalId == 0) return;
         ShwounsDAOTypes.ProposalState state_ = state(ds, latestProposalId);
+        // A proposer may have at most one proposal in flight. "In flight" includes the
+        // ObjectionPeriod (and the Updatable window, added with proposal editing).
         if (state_ == ShwounsDAOTypes.ProposalState.Active ||
-            state_ == ShwounsDAOTypes.ProposalState.Pending) {
+            state_ == ShwounsDAOTypes.ProposalState.Pending ||
+            state_ == ShwounsDAOTypes.ProposalState.ObjectionPeriod ||
+            state_ == ShwounsDAOTypes.ProposalState.Updatable) {
             revert ProposerAlreadyHasLiveProposal();
         }
     }
@@ -160,7 +172,12 @@ library ShwounsDAOProposals {
         p.values = values;
         p.signatures = signatures;
         p.calldatas = calldatas;
-        p.startBlock = block.number + ds.votingDelay;
+        // The proposal is editable (Updatable) until updatePeriodEndBlock; voting opens after the
+        // update window closes, then the voting delay. With an updatable period of 0 this reduces
+        // to the previous behavior (startBlock = creationBlock + votingDelay).
+        uint256 updatePeriodEnd = block.number + ds.proposalUpdatablePeriodInBlocks;
+        p.updatePeriodEndBlock = updatePeriodEnd;
+        p.startBlock = updatePeriodEnd + ds.votingDelay;
         p.endBlock = p.startBlock + ds.votingPeriod;
         p.totalSupply = totalSupply;
         p.creationBlock = block.number;
@@ -185,6 +202,27 @@ library ShwounsDAOProposals {
         string calldata reason
     ) external {
         _castVoteInternal(ds, msg.sender, proposalId, support, reason);
+    }
+
+    /// @notice Cast a vote via an EIP-712 signature (gasless / relayed voting). The recovered
+    ///         signer is the voter. Routes through the same internal path as castVote so the
+    ///         objection-period and dynamic-quorum logic apply identically. ECDSA-only (Nouns
+    ///         parity for ballots).
+    function castVoteBySig(
+        ShwounsDAOTypes.Storage storage ds,
+        uint256 proposalId,
+        uint8 support,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external {
+        bytes32 digest = ECDSA.toTypedDataHash(
+            _domainSeparator(ds),
+            keccak256(abi.encode(BALLOT_TYPEHASH, proposalId, support))
+        );
+        address voter = ecrecover(digest, v, r, s);
+        if (voter == address(0)) revert SigInvalid();
+        _castVoteInternal(ds, voter, proposalId, support, "");
     }
 
     function _castVoteInternal(
@@ -258,24 +296,25 @@ library ShwounsDAOProposals {
 
         ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
 
-        // Advanced lifecycle states: only reachable post-vote-success
+        // Advanced lifecycle states: only reachable once queue() has run.
         if (ss.finalized) return ShwounsDAOTypes.ProposalState.Executed;
-
-        if (ss.collectProgress > 0 && _isCollectComplete(ds, proposalId)) {
+        if (ss.queued) {
+            // Snapshot phase: complete when every frozen vault has been paged. A zero-funding
+            // proposal has snapshotTargetCount == 0, so this is satisfied immediately (C3).
+            if (ss.snapshotProgress < ss.snapshotTargetCount) {
+                return ShwounsDAOTypes.ProposalState.Queued;
+            }
+            // Collect phase: complete when every snapshotted vault has been paged. When no vault
+            // held the requested asset (or there were no assets), snapshottedVaults is empty, so
+            // this is satisfied immediately and the proposal is finalizable (C3).
+            if (ss.collectProgress < ss.snapshottedVaults.length) {
+                return ShwounsDAOTypes.ProposalState.Snapshotted;
+            }
             return ShwounsDAOTypes.ProposalState.Collected;
-        }
-        if (ss.snapshotProgress > 0 && ss.snapshotProgress >= ss.snapshotTargetCount && ss.snapshotTargetCount > 0) {
-            // snapshot phase complete OR snapshotTargetCount was 0 (no active vaults)
-            return ShwounsDAOTypes.ProposalState.Snapshotted;
-        }
-        if (ss.snapshotTargetCount > 0 || ss.assets.length > 0) {
-            // queue() was called (set snapshotTargetCount and assets)
-            return ss.snapshotTargetCount == 0
-                ? ShwounsDAOTypes.ProposalState.Snapshotted
-                : ShwounsDAOTypes.ProposalState.Queued;
         }
 
         // Pre-queue states
+        if (block.number <= p.updatePeriodEndBlock) return ShwounsDAOTypes.ProposalState.Updatable;
         if (block.number <= p.startBlock) return ShwounsDAOTypes.ProposalState.Pending;
         if (block.number <= p.endBlock) return ShwounsDAOTypes.ProposalState.Active;
         if (p.objectionPeriodEndBlock > 0 && block.number <= p.objectionPeriodEndBlock) {
@@ -283,6 +322,12 @@ library ShwounsDAOProposals {
         }
         if (p.forVotes <= p.againstVotes || p.forVotes < quorumVotes(ds, proposalId)) {
             return ShwounsDAOTypes.ProposalState.Defeated;
+        }
+        // Passed. If it was never queued before the queue deadline (voting end + queue period),
+        // it has Expired. Shwouns policy choice (Nouns leaves unqueued Succeeded indefinite).
+        uint256 votingEnd = p.objectionPeriodEndBlock > 0 ? p.objectionPeriodEndBlock : p.endBlock;
+        if (block.number > votingEnd + ds.proposalQueuePeriodInBlocks) {
+            return ShwounsDAOTypes.ProposalState.Expired;
         }
         return ShwounsDAOTypes.ProposalState.Succeeded;
     }
@@ -292,7 +337,44 @@ library ShwounsDAOProposals {
         uint256 proposalId
     ) internal view returns (bool) {
         ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
-        return ss.collectProgress >= ss.snapshottedVaults.length && ss.snapshottedVaults.length > 0;
+        // Complete once queued, the snapshot phase has finished, and every snapshotted vault has
+        // been collected. Zero-snapshot proposals (empty snapshottedVaults) complete as soon as
+        // the snapshot phase finishes (C3) — collectProgress (0) >= length (0).
+        return ss.queued
+            && ss.snapshotProgress >= ss.snapshotTargetCount
+            && ss.collectProgress >= ss.snapshottedVaults.length;
+    }
+
+    /// @notice Flat, mapping-free view of a proposal (for indexers/UIs). Includes the current
+    ///         dynamic quorum, computed state, signers, and snapshot/collect progress.
+    function proposals(
+        ShwounsDAOTypes.Storage storage ds,
+        uint256 proposalId
+    ) external view returns (ShwounsDAOTypes.ProposalCondensed memory c) {
+        ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
+        if (p.id == 0) revert ProposalDoesNotExist();
+        ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
+        c.id = p.id;
+        c.proposer = p.proposer;
+        c.proposalThreshold = p.proposalThreshold;
+        c.quorumVotes = quorumVotes(ds, proposalId);
+        c.startBlock = p.startBlock;
+        c.endBlock = p.endBlock;
+        c.updatePeriodEndBlock = p.updatePeriodEndBlock;
+        c.objectionPeriodEndBlock = p.objectionPeriodEndBlock;
+        c.forVotes = p.forVotes;
+        c.againstVotes = p.againstVotes;
+        c.abstainVotes = p.abstainVotes;
+        c.canceled = p.canceled;
+        c.vetoed = p.vetoed;
+        c.executed = p.executed;
+        c.totalSupply = p.totalSupply;
+        c.creationBlock = p.creationBlock;
+        c.signers = p.signers;
+        c.snapshotTargetCount = ss.snapshotTargetCount;
+        c.snapshotProgress = ss.snapshotProgress;
+        c.collectProgress = ss.collectProgress;
+        c.state = state(ds, proposalId);
     }
 
     // =========================================================================
@@ -301,14 +383,32 @@ library ShwounsDAOProposals {
 
     function cancel(ShwounsDAOTypes.Storage storage ds, uint256 proposalId) external {
         ShwounsDAOTypes.ProposalState s = state(ds, proposalId);
-        if (s == ShwounsDAOTypes.ProposalState.Executed) revert InvalidProposalState();
+        // Cannot cancel at a terminal state, nor once funds have been collected into the DAO
+        // (a stuck Collected proposal is unwound via refundStuckProposal, not cancel).
+        if (
+            s == ShwounsDAOTypes.ProposalState.Canceled ||
+            s == ShwounsDAOTypes.ProposalState.Defeated ||
+            s == ShwounsDAOTypes.ProposalState.Expired ||
+            s == ShwounsDAOTypes.ProposalState.Executed ||
+            s == ShwounsDAOTypes.ProposalState.Vetoed ||
+            s == ShwounsDAOTypes.ProposalState.Collected
+        ) revert InvalidProposalState();
 
         ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
-        // Proposer can cancel anytime pre-execution
-        if (msg.sender != p.proposer) {
-            // Anyone can cancel if proposer fell below threshold
-            uint96 proposerVotes = ds.shwouns.getPriorVotes(p.proposer, block.number - 1);
-            if (proposerVotes >= p.proposalThreshold) revert ProposerAboveThresholdAndNotVetoer();
+        address proposer = p.proposer;
+
+        // The proposer or ANY co-signer may cancel at will. Otherwise anyone may cancel only once
+        // the combined voting power behind the proposal (proposer + all signers) has fallen to or
+        // below its threshold.
+        uint256 votes = ds.shwouns.getPriorVotes(proposer, block.number - 1);
+        bool msgSenderIsProposer = (msg.sender == proposer);
+        address[] memory signers = p.signers;
+        for (uint256 i = 0; i < signers.length; i++) {
+            msgSenderIsProposer = msgSenderIsProposer || (msg.sender == signers[i]);
+            votes += ds.shwouns.getPriorVotes(signers[i], block.number - 1);
+        }
+        if (!(msgSenderIsProposer || votes <= p.proposalThreshold)) {
+            revert ProposerAboveThresholdAndNotVetoer();
         }
 
         p.canceled = true;
@@ -333,13 +433,40 @@ library ShwounsDAOProposals {
         ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
         ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
 
-        // Lock the iteration target for recordSnapshot
-        ss.snapshotTargetCount = ds.vaultRegistry.activeVaultsLength();
+        // Extract assets + per-asset requested amounts from the proposal's actions.
+        _extractAssetsAndAmounts(ds, proposalId, p.targets, p.values, p.signatures, p.calldatas);
 
-        // Extract assets + per-asset requested amounts from the proposal's actions
-        _extractAssetsAndAmounts(ds, proposalId, p.targets, p.values, p.calldatas);
+        // C1: freeze the active vault-ID SET at queue time. recordSnapshot pages over this
+        // stable copy, so the live registry active-set changing underneath us (deposits/
+        // withdrawals via markActive/markPossiblyInactive) cannot skip, duplicate, or brick
+        // iteration. Guarantee: "vault-set frozen at queue; balances sampled during snapshot
+        // paging" — NOT a historical balance checkpoint.
+        //
+        // Only frozen when the proposal actually requests funds. A pure-governance proposal
+        // (no ETH/ERC-20 requested → no assets) skips the snapshot phase entirely (C3):
+        // snapshotTargetCount stays 0, so it is immediately Collected and finalizable.
+        //
+        // NOTE (scale): copies the full active set into storage in one tx. Fine for the
+        // current/near-term active-set size; a paged-freeze variant is the follow-up if the
+        // active set ever approaches block-gas limits.
+        if (ss.assets.length > 0) {
+            ss.frozenVaultIds = ds.vaultRegistry.activeVaults();
+            ss.snapshotTargetCount = ss.frozenVaultIds.length;
+        }
+        ss.queued = true;
 
         emit ProposalQueued(proposalId);
+    }
+
+    /// @notice Build the calldata an action actually executes with. GovernorBravo-style actions
+    ///         may carry the function as a `signature` string with argument-only `calldata`; the
+    ///         executed calldata is then the 4-byte selector of that signature prepended to the
+    ///         args. With an empty signature, calldata is used verbatim. Both `finalize` and
+    ///         asset extraction MUST use this, or signature-form actions are mis-executed and
+    ///         invisible to snapshot/collect.
+    function _fullCalldata(string memory signature, bytes memory data) internal pure returns (bytes memory) {
+        if (bytes(signature).length == 0) return data;
+        return abi.encodePacked(bytes4(keccak256(bytes(signature))), data);
     }
 
     function _extractAssetsAndAmounts(
@@ -347,6 +474,7 @@ library ShwounsDAOProposals {
         uint256 proposalId,
         address[] memory targets,
         uint256[] memory values,
+        string[] memory signatures,
         bytes[] memory calldatas
     ) internal {
         ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
@@ -361,10 +489,11 @@ library ShwounsDAOProposals {
             ss.requestedAmount[address(0)] = totalETH;
         }
 
-        // Detect ERC-20 transfer() calls in calldata
+        // Detect ERC-20 transfer() calls, accounting for both the selector-in-calldata and the
+        // GovernorBravo signature-string action encodings.
         for (uint256 i = 0; i < targets.length; i++) {
-            bytes memory cd = calldatas[i];
-            if (cd.length < 36) continue;
+            bytes memory cd = _fullCalldata(signatures[i], calldatas[i]);
+            if (cd.length < 68) continue; // 4 (selector) + 32 (recipient) + 32 (amount)
             bytes4 sel;
             assembly { sel := mload(add(cd, 32)) }
             if (sel != ERC20_TRANSFER_SELECTOR) continue;
@@ -399,7 +528,8 @@ library ShwounsDAOProposals {
         if (end > ss.snapshotTargetCount) end = ss.snapshotTargetCount;
 
         for (uint256 i = start; i < end; i++) {
-            uint256 shwounId = ds.vaultRegistry.activeVaultAt(i);
+            // C1: page over the queue-time frozen set, never the live registry active-set.
+            uint256 shwounId = ss.frozenVaultIds[i];
             address vault = ds.vaultRegistry.vaultOf(shwounId);
 
             bool hasAnyBalance = false;
@@ -436,18 +566,23 @@ library ShwounsDAOProposals {
     function collect(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
-        uint256[] calldata shwounIds
+        uint256 batchSize
     ) external {
         if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Snapshotted) revert InvalidProposalState();
 
         ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
 
-        for (uint256 k = 0; k < shwounIds.length; k++) {
-            if (ss.vaultCollected[shwounIds[k]]) revert VaultAlreadyCollected();
-            _collectFromVault(ds, ss, proposalId, shwounIds[k]);
-            ss.vaultCollected[shwounIds[k]] = true;
-            ss.collectProgress++;
+        // C2: page strictly over the recorded snapshotted-vault list. Callers cannot supply
+        // arbitrary vault IDs to advance collectProgress without pulling from real vaults —
+        // which previously let an attacker force a proposal to Collected and DoS collection.
+        uint256 start = ss.collectProgress;
+        uint256 end = start + batchSize;
+        if (end > ss.snapshottedVaults.length) end = ss.snapshottedVaults.length;
+
+        for (uint256 i = start; i < end; i++) {
+            _collectFromVault(ds, ss, proposalId, ss.snapshottedVaults[i]);
         }
+        ss.collectProgress = end;
 
         if (_isCollectComplete(ds, proposalId)) {
             emit ProposalCollected(proposalId);
@@ -477,17 +612,34 @@ library ShwounsDAOProposals {
         uint256 snapshotBalance = ss.vaultSnapshot[shwounId][asset];
         if (snapshotBalance == 0) return;
 
-        uint256 share = (ss.requestedAmount[asset] * snapshotBalance) / ss.totalSnapshotBalance[asset];
+        uint256 total = ss.totalSnapshotBalance[asset];
+        // Pro-rata share of the requested amount, rounded UP. Ceiling matters: with floored
+        // shares the per-vault dust sums to a few wei BELOW `requested`, which the all-or-nothing
+        // finalize gate would then reject for a fully-funded proposal. Rounding up lets the
+        // collection reach `requested` exactly (see the `outstanding` cap below).
+        uint256 share = (ss.requestedAmount[asset] * snapshotBalance + total - 1) / total;
+
         uint256 currentBalance = asset == address(0)
             ? vault.balance
             : IERC20(asset).balanceOf(vault);
-        uint256 actual = share < currentBalance ? share : currentBalance;
 
-        if (actual < share) {
-            emit ShortfallRecorded(proposalId, shwounId, asset, share - actual);
+        uint256 actual = share;
+        if (currentBalance < actual) {
+            // The vault was (partly) drained since snapshot — a genuine shortfall for this vault.
+            emit ShortfallRecorded(proposalId, shwounId, asset, actual - currentBalance);
+            actual = currentBalance;
         }
+        // Never pull more than is still outstanding for this proposal: caps the ceiling
+        // over-collection so total collected lands exactly on `requested` (not a few wei over),
+        // and guards the subtraction below.
+        uint256 outstanding = ss.requestedAmount[asset] > ss.collected[asset]
+            ? ss.requestedAmount[asset] - ss.collected[asset]
+            : 0;
+        if (actual > outstanding) actual = outstanding;
+
         if (actual > 0) {
             ShwounsVault(payable(vault)).pullProRata(proposalId, asset, address(this), actual);
+            ss.collected[asset] += actual; // C4: per-proposal ledger (isolates this proposal's funds)
             emit AssetCollectedFromVault(proposalId, shwounId, asset, actual);
         }
     }
@@ -502,8 +654,18 @@ library ShwounsDAOProposals {
         ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
         ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
 
+        // C4: all-or-nothing. Every requested asset must be fully funded — via collect() and/or
+        // topUp() — before any target call runs. Because the check is against THIS proposal's own
+        // collected ledger, a proposal can never spend funds collected for another proposal, and
+        // a shortfall simply blocks execution (retry after a top-up, or unwind via
+        // refundStuckProposal). No silent scaling of the approved action values.
+        for (uint256 j = 0; j < ss.assets.length; j++) {
+            if (ss.collected[ss.assets[j]] < ss.requestedAmount[ss.assets[j]]) revert InsufficientCollected();
+        }
+
         for (uint256 i = 0; i < p.targets.length; i++) {
-            (bool success, bytes memory result) = p.targets[i].call{value: p.values[i]}(p.calldatas[i]);
+            bytes memory cd = _fullCalldata(p.signatures[i], p.calldatas[i]);
+            (bool success, bytes memory result) = p.targets[i].call{value: p.values[i]}(cd);
             if (!success) {
                 // Bubble up the revert. Funds stay in DAOLogic. Caller can retry.
                 if (result.length > 0) {
@@ -518,6 +680,35 @@ library ShwounsDAOProposals {
         emit ProposalExecuted(proposalId);
     }
 
+    /// @notice Emitted when someone tops up a proposal's collected ledger to cover a shortfall.
+    event ProposalToppedUp(uint256 indexed proposalId, address indexed asset, uint256 amount);
+
+    /// @notice Top up a proposal's per-asset collected ledger so an under-collected (shortfall)
+    ///         proposal can reach full funding and finalize (C4 / D2). Anyone may contribute: ETH
+    ///         as msg.value (asset == address(0)); ERC-20s pulled via prior approval. Restricted
+    ///         to assets the proposal actually requested, so funds can't be stranded.
+    /// @dev These library functions run in the facade's context (internal linkage), so msg.value /
+    ///      msg.sender are the facade call's; the facade's topUp wrapper is payable.
+    function topUp(
+        ShwounsDAOTypes.Storage storage ds,
+        uint256 proposalId,
+        address asset,
+        uint256 amount
+    ) external {
+        if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Collected) revert InvalidProposalState();
+        ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
+        if (amount == 0 || ss.requestedAmount[asset] == 0) revert InvalidTopUp();
+
+        if (asset == address(0)) {
+            if (msg.value != amount) revert InvalidTopUp();
+        } else {
+            if (msg.value != 0) revert InvalidTopUp();
+            IERC20(asset).transferFrom(msg.sender, address(this), amount);
+        }
+        ss.collected[asset] += amount;
+        emit ProposalToppedUp(proposalId, asset, amount);
+    }
+
     // =========================================================================
     // Signed proposals (proposeBySigs) — EIP-712 multi-Noun co-signing
     // =========================================================================
@@ -528,20 +719,40 @@ library ShwounsDAOProposals {
     bytes32 internal constant PROPOSAL_TYPEHASH = keccak256(
         "Proposal(address proposer,address[] targets,uint256[] values,string[] signatures,bytes[] calldatas,string description,uint256 expiry)"
     );
+    bytes32 internal constant BALLOT_TYPEHASH = keccak256("Ballot(uint256 proposalId,uint8 support)");
+    bytes32 internal constant UPDATE_PROPOSAL_TYPEHASH = keccak256(
+        "UpdateProposal(uint256 proposalId,address proposer,address[] targets,uint256[] values,string[] signatures,bytes[] calldatas,string description,uint256 expiry)"
+    );
     bytes32 internal constant DOMAIN_NAME_HASH = keccak256("ShwounsDAO");
 
     event SignatureCancelled(address indexed signer, bytes sig);
     event ProposalCreatedWithSigners(uint256 indexed id, address[] signers);
+    event ProposalUpdated(
+        uint256 indexed id, address indexed proposer, address[] targets, uint256[] values,
+        string[] signatures, bytes[] calldatas, string description, string updateMessage
+    );
+    event ProposalTransactionsUpdated(
+        uint256 indexed id, address indexed proposer, address[] targets, uint256[] values,
+        string[] signatures, bytes[] calldatas, string updateMessage
+    );
+    event ProposalDescriptionUpdated(
+        uint256 indexed id, address indexed proposer, string description, string updateMessage
+    );
 
     error SigExpired();
     error SigCancelled();
     error SigInvalid();
     error SignersBelowThreshold();
-    error DuplicateSigner();
+    error CanOnlyEditUpdatableProposals();
+    error OnlyProposerCanEdit();
+    error ProposerCannotUpdateProposalWithSigners();
+    error SignerCountMismatch();
 
-    /// @notice Create a proposal co-signed by multiple Shwoun holders. Their combined voting
-    ///         power must meet the proposal threshold. The first signer becomes the canonical
-    ///         proposer; the rest are recorded in proposal.signers.
+    /// @notice Create a proposal co-signed by multiple Shwoun holders. `msg.sender` is the
+    ///         proposer and contributes its own votes; the signers' combined voting power plus the
+    ///         proposer's must STRICTLY exceed the proposal threshold. Each signature binds the
+    ///         proposer, the proposal actions, and that signer's own expiry, and is verified via
+    ///         ERC-1271 (so smart-contract wallets can co-sign). Mirrors NounsDAOProposals.
     function proposeBySigs(
         ShwounsDAOTypes.Storage storage ds,
         ShwounsDAOTypes.ProposerSignature[] memory proposerSignatures,
@@ -551,66 +762,83 @@ library ShwounsDAOProposals {
         bytes[] memory calldatas,
         string memory description
     ) external returns (uint256 proposalId) {
+        if (proposerSignatures.length == 0) revert SignersBelowThreshold();
         _validateActionsAndThreshold_skip(ds, targets, values, signatures, calldatas);
 
-        address[] memory signers = _checkSignersAndThreshold(
-            ds, proposerSignatures, targets, values, signatures, calldatas, description
-        );
-
-        _enforceOneLiveProposalFor(ds, signers[0]);
-
+        // Create the proposal BEFORE verifying signatures. This makes signer de-duplication free:
+        // a repeated signer's latestProposalIds already points at this just-created (Pending)
+        // proposal, so _enforceOneLiveProposalFor reverts. proposer = msg.sender (set by _writeProposal).
         ds.proposalCount++;
         proposalId = ds.proposalCount;
-        _writeProposalForSigners(ds, proposalId, signers[0], signers, targets, values, signatures, calldatas);
-        ds.latestProposalIds[signers[0]] = proposalId;
+        _writeProposal(ds, proposalId, targets, values, signatures, calldatas);
 
-        _emitSignedProposalEvents(ds, proposalId, signers, targets, values, signatures, calldatas, description);
+        (uint256 votes, address[] memory signers) = _verifySignersAndCountVotes(
+            ds, proposerSignatures, targets, values, signatures, calldatas, description, proposalId
+        );
+        if (signers.length == 0) revert SignersBelowThreshold();
+        // Strictly greater than the threshold (Nouns parity), same as the normal propose() path.
+        if (votes <= bps2Uint(ds.proposalThresholdBPS, ds.shwouns.totalSupply())) {
+            revert SignersBelowThreshold();
+        }
+
+        ds._proposals[proposalId].signers = signers;
+
+        ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
+        emit ProposalCreated(
+            proposalId, msg.sender, targets, values, signatures, calldatas, p.startBlock, p.endBlock, description
+        );
+        emit ProposalCreatedWithSigners(proposalId, signers);
     }
 
-    function _checkSignersAndThreshold(
+    /// @dev Verify each signer's signature, enforce one-live-proposal per signer (which also
+    ///      de-duplicates signers against the just-created proposal), count the votes of signers
+    ///      with voting power, then add the proposer (msg.sender) the same way. Returns the trimmed
+    ///      signer set and total backing votes.
+    function _verifySignersAndCountVotes(
         ShwounsDAOTypes.Storage storage ds,
         ShwounsDAOTypes.ProposerSignature[] memory proposerSignatures,
         address[] memory targets,
         uint256[] memory values,
         string[] memory signatures,
         bytes[] memory calldatas,
-        string memory description
-    ) internal view returns (address[] memory signers) {
-        bytes32 digest = ECDSA.toTypedDataHash(
-            _domainSeparator(ds),
-            _hashProposal(targets, values, signatures, calldatas, description)
-        );
-        uint256 totalVotes;
-        (signers, totalVotes) = _validateSignersAndSum(ds, proposerSignatures, digest);
-        if (totalVotes < bps2Uint(ds.proposalThresholdBPS, ds.shwouns.totalSupply())) {
-            revert SignersBelowThreshold();
+        string memory description,
+        uint256 proposalId
+    ) internal returns (uint256 votes, address[] memory signers) {
+        bytes memory encodeData =
+            _calcProposalEncodeData(msg.sender, targets, values, signatures, calldatas, description);
+
+        signers = new address[](proposerSignatures.length);
+        uint256 numSigners = 0;
+        for (uint256 i = 0; i < proposerSignatures.length; i++) {
+            _verifyProposalSignature(ds, PROPOSAL_TYPEHASH, encodeData, proposerSignatures[i]);
+
+            address signer = proposerSignatures[i].signer;
+            _enforceOneLiveProposalFor(ds, signer); // checkNoActiveProp + signer de-dup
+
+            uint256 signerVotes = ds.shwouns.getPriorVotes(signer, block.number - 1);
+            if (signerVotes == 0) continue;
+
+            signers[numSigners++] = signer;
+            ds.latestProposalIds[signer] = proposalId;
+            votes += signerVotes;
         }
+        // Trim the signer array to the entries actually used.
+        assembly { mstore(signers, numSigners) }
+
+        _enforceOneLiveProposalFor(ds, msg.sender);
+        ds.latestProposalIds[msg.sender] = proposalId;
+        votes += ds.shwouns.getPriorVotes(msg.sender, block.number - 1);
     }
 
     function _enforceOneLiveProposalFor(ShwounsDAOTypes.Storage storage ds, address proposer) internal view {
         if (ds.latestProposalIds[proposer] == 0) return;
         ShwounsDAOTypes.ProposalState s = state(ds, ds.latestProposalIds[proposer]);
-        if (s == ShwounsDAOTypes.ProposalState.Active || s == ShwounsDAOTypes.ProposalState.Pending) {
+        if (s == ShwounsDAOTypes.ProposalState.Active ||
+            s == ShwounsDAOTypes.ProposalState.Pending ||
+            s == ShwounsDAOTypes.ProposalState.ObjectionPeriod ||
+            s == ShwounsDAOTypes.ProposalState.Updatable) {
             revert ProposerAlreadyHasLiveProposal();
         }
-    }
-
-    function _emitSignedProposalEvents(
-        ShwounsDAOTypes.Storage storage ds,
-        uint256 proposalId,
-        address[] memory signers,
-        address[] memory targets,
-        uint256[] memory values,
-        string[] memory signatures,
-        bytes[] memory calldatas,
-        string memory description
-    ) internal {
-        ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
-        emit ProposalCreated(
-            proposalId, signers[0], targets, values, signatures, calldatas,
-            p.startBlock, p.endBlock, description
-        );
-        emit ProposalCreatedWithSigners(proposalId, signers);
     }
 
     /// @notice Allow a signer to invalidate a specific signature. After cancellation,
@@ -620,54 +848,117 @@ library ShwounsDAOProposals {
         emit SignatureCancelled(msg.sender, sig);
     }
 
-    function _validateSignersAndSum(
-        ShwounsDAOTypes.Storage storage ds,
-        ShwounsDAOTypes.ProposerSignature[] memory ps,
-        bytes32 digest
-    ) internal view returns (address[] memory signers, uint256 totalVotes) {
-        uint256 n = ps.length;
-        if (n == 0) revert SignersBelowThreshold();
-        signers = new address[](n);
-        for (uint256 i = 0; i < n; i++) {
-            if (block.timestamp > ps[i].expirationTimestamp) revert SigExpired();
-            if (ds.cancelledSigs[ps[i].signer][keccak256(ps[i].sig)]) revert SigCancelled();
-            address recovered = ECDSA.recover(digest, ps[i].sig);
-            if (recovered != ps[i].signer) revert SigInvalid();
+    // =========================================================================
+    // Proposal editing (Updatable window) — Nouns parity
+    // =========================================================================
 
-            // Detect duplicates (O(n²) but n is small)
-            for (uint256 j = 0; j < i; j++) {
-                if (signers[j] == ps[i].signer) revert DuplicateSigner();
-            }
-            signers[i] = ps[i].signer;
-            totalVotes += ds.shwouns.getPriorVotes(ps[i].signer, block.number - 1);
-        }
-    }
-
-    function _writeProposalForSigners(
+    /// @dev A proposal may be edited only while Updatable, only by its proposer, and (for the
+    ///      non-sig path) only if it has no co-signers (those must use updateProposalBySigs).
+    function _checkProposalUpdatable(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
-        address proposer,
-        address[] memory signers,
+        ShwounsDAOTypes.Proposal storage proposal
+    ) internal view {
+        if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Updatable)
+            revert CanOnlyEditUpdatableProposals();
+        if (msg.sender != proposal.proposer) revert OnlyProposerCanEdit();
+        if (proposal.signers.length > 0) revert ProposerCannotUpdateProposalWithSigners();
+    }
+
+    function updateProposal(
+        ShwounsDAOTypes.Storage storage ds,
+        uint256 proposalId,
+        address[] memory targets,
+        uint256[] memory values,
+        string[] memory signatures,
+        bytes[] memory calldatas,
+        string memory description,
+        string memory updateMessage
+    ) external {
+        _updateProposalTransactionsInternal(ds, proposalId, targets, values, signatures, calldatas);
+        emit ProposalUpdated(proposalId, msg.sender, targets, values, signatures, calldatas, description, updateMessage);
+    }
+
+    function updateProposalTransactions(
+        ShwounsDAOTypes.Storage storage ds,
+        uint256 proposalId,
+        address[] memory targets,
+        uint256[] memory values,
+        string[] memory signatures,
+        bytes[] memory calldatas,
+        string memory updateMessage
+    ) external {
+        _updateProposalTransactionsInternal(ds, proposalId, targets, values, signatures, calldatas);
+        emit ProposalTransactionsUpdated(proposalId, msg.sender, targets, values, signatures, calldatas, updateMessage);
+    }
+
+    function _updateProposalTransactionsInternal(
+        ShwounsDAOTypes.Storage storage ds,
+        uint256 proposalId,
         address[] memory targets,
         uint256[] memory values,
         string[] memory signatures,
         bytes[] memory calldatas
     ) internal {
-        uint256 totalSupply = ds.shwouns.totalSupply();
+        _validateActionsAndThreshold_skip(ds, targets, values, signatures, calldatas);
         ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
-        p.id = proposalId;
-        p.proposer = proposer;
-        p.proposalThreshold = bps2Uint(ds.proposalThresholdBPS, totalSupply);
-        p.quorumVotes = bps2Uint(ds.quorumVotesBPS, totalSupply);
+        _checkProposalUpdatable(ds, proposalId, p);
         p.targets = targets;
         p.values = values;
         p.signatures = signatures;
         p.calldatas = calldatas;
-        p.startBlock = block.number + ds.votingDelay;
-        p.endBlock = p.startBlock + ds.votingPeriod;
-        p.totalSupply = totalSupply;
-        p.creationBlock = block.number;
-        p.signers = signers;
+    }
+
+    function updateProposalDescription(
+        ShwounsDAOTypes.Storage storage ds,
+        uint256 proposalId,
+        string calldata description,
+        string calldata updateMessage
+    ) external {
+        ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
+        _checkProposalUpdatable(ds, proposalId, p);
+        emit ProposalDescriptionUpdated(proposalId, msg.sender, description, updateMessage);
+    }
+
+    /// @notice Edit a co-signed proposal during its Updatable window. The proposer submits and ALL
+    ///         original signers must re-sign the update (same set, same order). Signatures bind the
+    ///         proposalId via UPDATE_PROPOSAL_TYPEHASH.
+    function updateProposalBySigs(
+        ShwounsDAOTypes.Storage storage ds,
+        uint256 proposalId,
+        ShwounsDAOTypes.ProposerSignature[] memory proposerSignatures,
+        address[] memory targets,
+        uint256[] memory values,
+        string[] memory signatures,
+        bytes[] memory calldatas,
+        string memory description,
+        string memory updateMessage
+    ) external {
+        _validateActionsAndThreshold_skip(ds, targets, values, signatures, calldatas);
+        if (proposerSignatures.length == 0) revert SignersBelowThreshold();
+
+        ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
+        if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Updatable)
+            revert CanOnlyEditUpdatableProposals();
+        if (msg.sender != p.proposer) revert OnlyProposerCanEdit();
+
+        address[] memory signers = p.signers;
+        if (proposerSignatures.length != signers.length) revert SignerCountMismatch();
+
+        bytes memory encodeData = abi.encodePacked(
+            proposalId, _calcProposalEncodeData(msg.sender, targets, values, signatures, calldatas, description)
+        );
+        for (uint256 i = 0; i < proposerSignatures.length; i++) {
+            _verifyProposalSignature(ds, UPDATE_PROPOSAL_TYPEHASH, encodeData, proposerSignatures[i]);
+            // Assume the same signer set in the same order (avoids an O(n^2) membership search).
+            if (signers[i] != proposerSignatures[i].signer) revert OnlyProposerCanEdit();
+        }
+
+        p.targets = targets;
+        p.values = values;
+        p.signatures = signatures;
+        p.calldatas = calldatas;
+        emit ProposalUpdated(proposalId, msg.sender, targets, values, signatures, calldatas, description, updateMessage);
     }
 
     /// @dev Same as _validateActionsAndThreshold but without the proposer-threshold check
@@ -690,23 +981,52 @@ library ShwounsDAOProposals {
         return keccak256(abi.encode(DOMAIN_TYPEHASH, DOMAIN_NAME_HASH, block.chainid, address(this)));
     }
 
-    function _hashProposal(
+    /// @dev EIP-712 proposal encoding (Nouns parity). Binds the PROPOSER plus the proposal
+    ///      actions; the per-signer expiry is folded in by _sigDigest. Earlier this hard-coded
+    ///      proposer = address(0) and expiry = 0, so neither was bound — a relayer could swap the
+    ///      submitter or the expiry while keeping a valid signature.
+    function _calcProposalEncodeData(
+        address proposer,
         address[] memory targets,
         uint256[] memory values,
         string[] memory signatures,
         bytes[] memory calldatas,
         string memory description
-    ) internal pure returns (bytes32) {
-        return keccak256(abi.encode(
-            PROPOSAL_TYPEHASH,
-            address(0), // proposer field (unused — sig signed over actions, not proposer)
+    ) internal pure returns (bytes memory) {
+        return abi.encode(
+            proposer,
             keccak256(abi.encodePacked(targets)),
             keccak256(abi.encodePacked(values)),
             _hashStringArray(signatures),
             _hashBytesArray(calldatas),
-            keccak256(bytes(description)),
-            uint256(0) // expiry baked into ProposerSignature, not the hash itself
-        ));
+            keccak256(bytes(description))
+        );
+    }
+
+    /// @dev The typed-data digest a given signer signs: binds the proposal encoding AND that
+    ///      signer's own expiry, so the expiry is cryptographically committed (not malleable).
+    function _sigDigest(
+        ShwounsDAOTypes.Storage storage ds,
+        bytes32 typehash,
+        bytes memory encodeData,
+        uint256 expirationTimestamp
+    ) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encodePacked(typehash, encodeData, expirationTimestamp));
+        return ECDSA.toTypedDataHash(_domainSeparator(ds), structHash);
+    }
+
+    /// @dev Verify one signer's signature: not cancelled, valid (ERC-1271 via SignatureChecker so
+    ///      contract wallets can co-sign), and not expired. `typehash` selects propose vs update.
+    function _verifyProposalSignature(
+        ShwounsDAOTypes.Storage storage ds,
+        bytes32 typehash,
+        bytes memory encodeData,
+        ShwounsDAOTypes.ProposerSignature memory ps
+    ) internal view {
+        if (ds.cancelledSigs[ps.signer][keccak256(ps.sig)]) revert SigCancelled();
+        bytes32 digest = _sigDigest(ds, typehash, encodeData, ps.expirationTimestamp);
+        if (!SignatureChecker.isValidSignatureNow(ps.signer, digest, ps.sig)) revert SigInvalid();
+        if (block.timestamp > ps.expirationTimestamp) revert SigExpired();
     }
 
     function _hashStringArray(string[] memory arr) internal pure returns (bytes32) {
@@ -725,18 +1045,23 @@ library ShwounsDAOProposals {
         return keccak256(abi.encodePacked(hashes));
     }
 
-    /// @notice Compute the EIP-712 digest a signer would sign over a given proposal.
-    ///         Helper exposed for off-chain UIs to construct the signing payload.
+    /// @notice Compute the EIP-712 digest a signer signs for a proposal. Off-chain UIs call this
+    ///         to build the signing payload. ABI CHANGED vs the earlier unsound version: it now
+    ///         takes the `proposer` (the address that will submit proposeBySigs) and the signer's
+    ///         `expirationTimestamp`, both of which are bound into the digest.
     function proposalDigest(
         ShwounsDAOTypes.Storage storage ds,
+        address proposer,
         address[] memory targets,
         uint256[] memory values,
         string[] memory signatures,
         bytes[] memory calldatas,
-        string memory description
+        string memory description,
+        uint256 expirationTimestamp
     ) external view returns (bytes32) {
-        bytes32 proposalHash = _hashProposal(targets, values, signatures, calldatas, description);
-        return ECDSA.toTypedDataHash(_domainSeparator(ds), proposalHash);
+        bytes memory encodeData =
+            _calcProposalEncodeData(proposer, targets, values, signatures, calldatas, description);
+        return _sigDigest(ds, PROPOSAL_TYPEHASH, encodeData, expirationTimestamp);
     }
 
     // =========================================================================
@@ -762,13 +1087,18 @@ library ShwounsDAOProposals {
         for (uint256 a = 0; a < assetsToRefund.length; a++) {
             address asset = assetsToRefund[a];
             uint256 total = ss.totalSnapshotBalance[asset];
-            if (total == 0) continue;
+            // C4: distribute only what was ACTUALLY collected for this proposal, pro-rata by
+            // snapshot share — never the snapshot-derived requested amount (which could exceed
+            // collected when vaults were drained between snapshot and collect).
+            uint256 collectedTotal = ss.collected[asset];
+            if (total == 0 || collectedTotal == 0) continue;
             uint256 distributed = 0;
             for (uint256 i = 0; i < vaultCount; i++) {
                 uint256 shwounId = ss.snapshottedVaults[i];
                 uint256 snap = ss.vaultSnapshot[shwounId][asset];
                 if (snap == 0) continue;
-                uint256 share = (ss.requestedAmount[asset] * snap) / total;
+                uint256 share = (collectedTotal * snap) / total;
+                if (share == 0) continue;
                 // Transfer to the current owner of the Noun (not the vault)
                 address owner = ds.shwouns.ownerOf(shwounId);
                 if (asset == address(0)) {
@@ -779,6 +1109,7 @@ library ShwounsDAOProposals {
                 }
                 distributed += share;
             }
+            ss.collected[asset] = 0; // drained — prevent any double refund
             emit StuckProposalRefunded(proposalId, asset, distributed);
         }
 
@@ -798,8 +1129,13 @@ library ShwounsDAOProposals {
         uint256 proposalId
     ) public view returns (uint256) {
         ShwounsDAOTypes.Proposal storage proposal = ds._proposals[proposalId];
-        if (ds.quorumParamsCheckpoints.length == 0) {
-            // Fallback to fixed quorum recorded at proposal creation.
+        uint256 len = ds.quorumParamsCheckpoints.length;
+        // Fall back to the fixed quorum captured at creation when there are no dynamic-quorum
+        // checkpoints, OR when this proposal predates the first checkpoint. Without the second
+        // clause, _getDynamicQuorumParamsAt returns all-zero params for a pre-first-checkpoint
+        // block → a quorum of 0, letting an older proposal pass on a single FOR vote the moment
+        // the DAO sets its first dynamic-quorum checkpoint (retroactive-zero bug).
+        if (len == 0 || proposal.creationBlock < ds.quorumParamsCheckpoints[0].fromBlock) {
             return proposal.quorumVotes;
         }
         ShwounsDAOTypes.DynamicQuorumParams memory params =
@@ -820,6 +1156,17 @@ library ShwounsDAOProposals {
             ? adjustedQuorumBPS
             : uint256(params.maxQuorumVotesBPS);
         return (totalSupply * finalBPS) / 10000;
+    }
+
+    /// @notice The dynamic-quorum params in effect at a given block (public view; Nouns parity).
+    function getDynamicQuorumParamsAt(
+        ShwounsDAOTypes.Storage storage ds,
+        uint256 blockNumber
+    ) external view returns (ShwounsDAOTypes.DynamicQuorumParams memory) {
+        if (ds.quorumParamsCheckpoints.length == 0) {
+            return ShwounsDAOTypes.DynamicQuorumParams(0, 0, 0);
+        }
+        return _getDynamicQuorumParamsAt(ds, blockNumber);
     }
 
     function _getDynamicQuorumParamsAt(

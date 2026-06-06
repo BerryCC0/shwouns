@@ -134,6 +134,17 @@ for design rationale — read it before making non-obvious changes.
 
 ## What's NOT done
 
+> **Status (June 2026):** A two-round security review disproved the earlier "protocol logic
+> complete" framing — the snapshot→collect→finalize mechanic had 4 critical bugs (vault-set not
+> frozen at queue, collect accepting arbitrary IDs, zero-funding proposals bricking, commingled
+> funds) and the governance layer was an MVP. The **correctness gate is now complete** on branch
+> `governance-parity-and-lifecycle-fixes` (lifecycle redesign + sound signed proposals + dynamic
+> quorum/threshold/calldata fixes + vote-by-signature; 121 tests). See
+> `~/.claude/plans/hey-claude-we-ve-been-velvet-canyon.md`.
+
+- **Remaining V4 parity** — admin param bounds + `initialize` validation (needs migrating tests off
+  votingPeriod=5 / threshold=0), dynamic-quorum seed-at-init, proposal editing (Updatable +
+  `queueDeadline`/`Expired`), bulk `proposals()` getter, and a mechanical ABI parity checklist.
 - **External audit** — recommended firms: Spearbit, Code4rena, Cantina. Budget $5-15k,
   2-4 weeks lead time. Snapshot+collect+finalize mechanic is novel and warrants focused
   review.

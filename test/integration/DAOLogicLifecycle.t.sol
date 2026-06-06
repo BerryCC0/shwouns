@@ -53,9 +53,14 @@ contract DAOLogicLifecycleTest is Test {
         // Deploy DAOLogic via UUPS proxy
         ShwounsDAOLogic daoImpl = new ShwounsDAOLogic();
         ShwounsDAOTypes.ShwounsDAOParams memory params = ShwounsDAOTypes.ShwounsDAOParams({
-            votingPeriod: 5, // blocks
+            votingPeriod: 7200, // blocks (min allowed)
             votingDelay: 1,
-            proposalThresholdBPS: 0 // no threshold for tests
+            proposalThresholdBPS: 1, // min allowed; threshold = 0 at this small supply
+            proposalUpdatablePeriodInBlocks: 0,
+            proposalQueuePeriodInBlocks: 50400
+        });
+        ShwounsDAOTypes.DynamicQuorumParams memory dq = ShwounsDAOTypes.DynamicQuorumParams({
+            minQuorumVotesBPS: 200, maxQuorumVotesBPS: 6000, quorumCoefficient: 0
         });
         bytes memory initData = abi.encodeWithSelector(
             ShwounsDAOLogic.initialize.selector,
@@ -64,7 +69,7 @@ contract DAOLogicLifecycleTest is Test {
             IShwounsTokenLike(address(token)),
             registry,
             params,
-            1000                   // quorumVotesBPS (10%)
+            dq                     // dynamic-quorum seed
         );
         ERC1967Proxy daoProxy = new ERC1967Proxy(address(daoImpl), initData);
         dao = ShwounsDAOLogic(payable(address(daoProxy)));
@@ -129,14 +134,17 @@ contract DAOLogicLifecycleTest is Test {
         vm.prank(alice);
         uint256 proposalId = dao.propose(targets, values, sigs, calldatas, "test proposal: send 6 ETH");
 
-        // 2. State should be Pending until votingDelay elapses
+        // 2. On the creation block the proposal is Updatable (the pre-voting edit window is
+        //    [creationBlock, creationBlock + proposalUpdatablePeriodInBlocks]; with the period
+        //    set to 0 that window is just the creation block itself). It becomes Pending on the
+        //    next block and Active once votingDelay elapses.
         assertEq(
             uint256(dao.state(proposalId)),
-            uint256(ShwounsDAOTypes.ProposalState.Pending),
-            "Pending"
+            uint256(ShwounsDAOTypes.ProposalState.Updatable),
+            "Updatable on creation block"
         );
 
-        vm.roll(block.number + 2); // past votingDelay
+        vm.roll(block.number + 2); // past updatable window + votingDelay
 
         assertEq(
             uint256(dao.state(proposalId)),
@@ -150,7 +158,7 @@ contract DAOLogicLifecycleTest is Test {
         vm.prank(carol); dao.castVote(proposalId, 1);
 
         // 4. Past voting period
-        vm.roll(block.number + 6);
+        vm.roll(block.number + 7201);
 
         assertEq(
             uint256(dao.state(proposalId)),
@@ -191,7 +199,7 @@ contract DAOLogicLifecycleTest is Test {
         vaultIds[2] = carolNoun;
 
         uint256 daoBalanceBefore = address(dao).balance;
-        dao.collect(proposalId, vaultIds);
+        dao.collect(proposalId, vaultIds.length);
 
         // Total drawn should be 6 ETH (the requested amount)
         uint256 drawn = address(dao).balance - daoBalanceBefore;
@@ -241,7 +249,7 @@ contract DAOLogicLifecycleTest is Test {
         vm.roll(block.number + 2);
         vm.prank(alice); dao.castVote(proposalId, 1);
         vm.prank(bob); dao.castVote(proposalId, 1);
-        vm.roll(block.number + 6);
+        vm.roll(block.number + 7201);
 
         dao.queue(proposalId);
         dao.recordSnapshot(proposalId, 10);
@@ -256,7 +264,7 @@ contract DAOLogicLifecycleTest is Test {
         vaultIds[0] = aliceNoun;
         vaultIds[1] = bobNoun;
         vaultIds[2] = carolNoun;
-        dao.collect(proposalId, vaultIds);
+        dao.collect(proposalId, vaultIds.length);
 
         // Alice's vault contributed 0 (drained). Bob + Carol contributed their full pro-rata share.
         // Bob's share: 6 * 5/10 = 3 ETH

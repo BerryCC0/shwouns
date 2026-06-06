@@ -45,8 +45,10 @@ contract DeploymentTest is Test {
             timeBuffer: 300,
             minBidIncrementPct: 2,
             votingDelay: 1,         // 1 block for fast test cycles
-            votingPeriod: 5,        // 5 blocks
-            proposalThresholdBPS: 0,
+            votingPeriod: 7200,     // min allowed voting period
+            proposalThresholdBPS: 1,
+            proposalUpdatablePeriodInBlocks: 0,
+            proposalQueuePeriodInBlocks: 50400,
             quorumVotesBPS: 1000,   // 10%
             giMintPrice: 0.01 ether,
             proposalReward: 0.1 ether,
@@ -234,7 +236,7 @@ contract DeploymentTest is Test {
         d.dao.recordSnapshot(pid, 10);
         uint256[] memory vaultIds = new uint256[](1);
         vaultIds[0] = 1;
-        d.dao.collect(pid, vaultIds);
+        d.dao.collect(pid, vaultIds.length);
 
         uint256 grBefore = address(d.rewards).balance;
         d.dao.finalize(pid);

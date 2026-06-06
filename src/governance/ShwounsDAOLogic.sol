@@ -36,23 +36,66 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
     error OnlyAdmin();
     error InvalidAddress();
     error AlreadyLocked();
+    error InvalidMinQuorumVotesBPS();
+    error InvalidMaxQuorumVotesBPS();
+    error MinQuorumBPSGreaterThanMaxQuorumBPS();
+
+    // Dynamic-quorum BPS bounds (Nouns parity, from NounsDAOAdmin).
+    uint16 public constant MIN_QUORUM_VOTES_BPS_LOWER_BOUND = 200;
+    uint16 public constant MIN_QUORUM_VOTES_BPS_UPPER_BOUND = 2_000;
+    uint16 public constant MAX_QUORUM_VOTES_BPS_UPPER_BOUND = 6_000;
+
+    // Admin parameter bounds (Nouns parity; 12-second blocks).
+    uint256 public constant MIN_PROPOSAL_THRESHOLD_BPS = 1;
+    uint256 public constant MAX_PROPOSAL_THRESHOLD_BPS = 1_000;      // 10%
+    uint256 public constant MIN_VOTING_PERIOD_BLOCKS = 7_200;       // 1 day
+    uint256 public constant MAX_VOTING_PERIOD_BLOCKS = 100_800;     // 2 weeks
+    uint256 public constant MIN_VOTING_DELAY_BLOCKS = 1;
+    uint256 public constant MAX_VOTING_DELAY_BLOCKS = 100_800;      // 2 weeks
+    uint256 public constant MAX_UPDATABLE_PERIOD_BLOCKS = 50_400;   // 7 days
+    uint256 public constant MAX_QUEUE_PERIOD_BLOCKS = 50_400;       // 7 days
+    uint256 public constant MAX_OBJECTION_PERIOD_BLOCKS = 50_400;   // 7 days
+    uint256 public constant MAX_LAST_MINUTE_WINDOW_BLOCKS = 50_400; // 7 days
+
+    error InvalidVotingPeriod();
+    error InvalidVotingDelay();
+    error InvalidProposalThresholdBPS();
+    error InvalidPeriod();
+
+    /// @notice The maximum number of actions per proposal.
+    function proposalMaxOperations() public pure returns (uint256) { return 10; }
 
     modifier onlyAdmin() {
         if (msg.sender != ds.admin) revert OnlyAdmin();
         _;
     }
 
-    /// @notice Initialize the DAO. Deployed via UUPS proxy.
+    function _validateGovParams(ShwounsDAOTypes.ShwounsDAOParams calldata p) internal pure {
+        if (p.votingPeriod < MIN_VOTING_PERIOD_BLOCKS || p.votingPeriod > MAX_VOTING_PERIOD_BLOCKS)
+            revert InvalidVotingPeriod();
+        if (p.votingDelay < MIN_VOTING_DELAY_BLOCKS || p.votingDelay > MAX_VOTING_DELAY_BLOCKS)
+            revert InvalidVotingDelay();
+        if (p.proposalThresholdBPS < MIN_PROPOSAL_THRESHOLD_BPS || p.proposalThresholdBPS > MAX_PROPOSAL_THRESHOLD_BPS)
+            revert InvalidProposalThresholdBPS();
+        if (p.proposalUpdatablePeriodInBlocks > MAX_UPDATABLE_PERIOD_BLOCKS) revert InvalidPeriod();
+        // A queue window of 0 would expire proposals the moment voting ends.
+        if (p.proposalQueuePeriodInBlocks == 0 || p.proposalQueuePeriodInBlocks > MAX_QUEUE_PERIOD_BLOCKS)
+            revert InvalidPeriod();
+    }
+
+    /// @notice Initialize the DAO. Deployed via UUPS proxy. Validates all governance params and
+    ///         seeds the first dynamic-quorum checkpoint so dynamic quorum is live from block 0.
     function initialize(
         address admin_,
         address vetoer_,
         IShwounsTokenLike shwouns_,
         IShwounsVaultRegistry vaultRegistry_,
         ShwounsDAOTypes.ShwounsDAOParams calldata params,
-        uint256 quorumVotesBPS_
+        ShwounsDAOTypes.DynamicQuorumParams calldata quorumParams
     ) external initializer {
         if (admin_ == address(0) || address(shwouns_) == address(0) || address(vaultRegistry_) == address(0))
             revert InvalidAddress();
+        _validateGovParams(params);
         __UUPSUpgradeable_init();
 
         ds.admin = admin_;
@@ -62,7 +105,15 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
         ds.votingDelay = params.votingDelay;
         ds.votingPeriod = params.votingPeriod;
         ds.proposalThresholdBPS = params.proposalThresholdBPS;
-        ds.quorumVotesBPS = quorumVotesBPS_;
+        ds.proposalUpdatablePeriodInBlocks = params.proposalUpdatablePeriodInBlocks;
+        ds.proposalQueuePeriodInBlocks = params.proposalQueuePeriodInBlocks;
+
+        // Seed the first dynamic-quorum checkpoint (bounds-checked). Legacy fixed-quorum fallback
+        // tracks the seed's minimum (only ever used for a hypothetical pre-checkpoint proposal).
+        _setDynamicQuorumParams(
+            quorumParams.minQuorumVotesBPS, quorumParams.maxQuorumVotesBPS, quorumParams.quorumCoefficient
+        );
+        ds.quorumVotesBPS = quorumParams.minQuorumVotesBPS;
     }
 
     /// @notice UUPS upgrade authorization — admin only.
@@ -97,14 +148,62 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
         ds.cancelSig(sig);
     }
 
-    function proposalDigest(
+    // -- Proposal editing (Updatable window) --
+
+    function updateProposal(
+        uint256 proposalId,
         address[] memory targets,
         uint256[] memory values,
         string[] memory signatures,
         bytes[] memory calldatas,
-        string memory description
+        string memory description,
+        string memory updateMessage
+    ) external {
+        ds.updateProposal(proposalId, targets, values, signatures, calldatas, description, updateMessage);
+    }
+
+    function updateProposalTransactions(
+        uint256 proposalId,
+        address[] memory targets,
+        uint256[] memory values,
+        string[] memory signatures,
+        bytes[] memory calldatas,
+        string memory updateMessage
+    ) external {
+        ds.updateProposalTransactions(proposalId, targets, values, signatures, calldatas, updateMessage);
+    }
+
+    function updateProposalDescription(
+        uint256 proposalId,
+        string calldata description,
+        string calldata updateMessage
+    ) external {
+        ds.updateProposalDescription(proposalId, description, updateMessage);
+    }
+
+    function updateProposalBySigs(
+        uint256 proposalId,
+        ShwounsDAOTypes.ProposerSignature[] memory proposerSignatures,
+        address[] memory targets,
+        uint256[] memory values,
+        string[] memory signatures,
+        bytes[] memory calldatas,
+        string memory description,
+        string memory updateMessage
+    ) external {
+        ds.updateProposalBySigs(proposalId, proposerSignatures, targets, values, signatures, calldatas, description, updateMessage);
+    }
+
+    function proposalDigest(
+        address proposer,
+        address[] memory targets,
+        uint256[] memory values,
+        string[] memory signatures,
+        bytes[] memory calldatas,
+        string memory description,
+        uint256 expirationTimestamp
     ) external view returns (bytes32) {
-        return ds.proposalDigest(targets, values, signatures, calldatas, description);
+        return ds.proposalDigest(proposer, targets, values, signatures, calldatas, description, expirationTimestamp);
     }
 
     function isSigCancelled(address signer, bytes32 sigHash) external view returns (bool) {
@@ -125,6 +224,11 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
 
     function castVoteWithReason(uint256 proposalId, uint8 support, string calldata reason) external {
         ds.castVoteWithReason(proposalId, support, reason);
+    }
+
+    /// @notice Cast a vote with an EIP-712 signature (gasless / relayed). Recovered signer = voter.
+    function castVoteBySig(uint256 proposalId, uint8 support, uint8 v, bytes32 r, bytes32 s) external {
+        ds.castVoteBySig(proposalId, support, v, r, s);
     }
 
     // -------------------------------------------------------------------------
@@ -222,8 +326,17 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
         ds.recordSnapshot(proposalId, batchSize);
     }
 
-    function collect(uint256 proposalId, uint256[] calldata shwounIds) external {
-        ds.collect(proposalId, shwounIds);
+    /// @notice Pull pro-rata from the next `batchSize` snapshotted vaults into this proposal's
+    ///         collected ledger. Paged strictly over the recorded snapshotted-vault list — no
+    ///         caller-supplied vault IDs (C2).
+    function collect(uint256 proposalId, uint256 batchSize) external {
+        ds.collect(proposalId, batchSize);
+    }
+
+    /// @notice Top up an under-collected proposal so it can finalize. ETH via msg.value, ERC-20
+    ///         via prior approval; restricted to assets the proposal requested (C4 / D2).
+    function topUp(uint256 proposalId, address asset, uint256 amount) external payable {
+        ds.topUp(proposalId, asset, amount);
     }
 
     function finalize(uint256 proposalId) external {
@@ -263,31 +376,53 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
     // -------------------------------------------------------------------------
 
     function setVotingDelay(uint256 newVotingDelay) external onlyAdmin {
+        if (newVotingDelay < MIN_VOTING_DELAY_BLOCKS || newVotingDelay > MAX_VOTING_DELAY_BLOCKS)
+            revert InvalidVotingDelay();
         uint256 oldVotingDelay = ds.votingDelay;
         ds.votingDelay = newVotingDelay;
         emit VotingDelaySet(oldVotingDelay, newVotingDelay);
     }
 
     function setVotingPeriod(uint256 newVotingPeriod) external onlyAdmin {
+        if (newVotingPeriod < MIN_VOTING_PERIOD_BLOCKS || newVotingPeriod > MAX_VOTING_PERIOD_BLOCKS)
+            revert InvalidVotingPeriod();
         uint256 oldVotingPeriod = ds.votingPeriod;
         ds.votingPeriod = newVotingPeriod;
         emit VotingPeriodSet(oldVotingPeriod, newVotingPeriod);
     }
 
     function setProposalThresholdBPS(uint256 newProposalThresholdBPS) external onlyAdmin {
+        if (newProposalThresholdBPS < MIN_PROPOSAL_THRESHOLD_BPS || newProposalThresholdBPS > MAX_PROPOSAL_THRESHOLD_BPS)
+            revert InvalidProposalThresholdBPS();
         uint256 oldProposalThresholdBPS = ds.proposalThresholdBPS;
         ds.proposalThresholdBPS = newProposalThresholdBPS;
         emit ProposalThresholdBPSSet(oldProposalThresholdBPS, newProposalThresholdBPS);
     }
 
-    /// @notice Set the simple quorum BPS. Used when no dynamic quorum checkpoints exist.
+    /// @notice Legacy fixed-quorum BPS — only a fallback for proposals created before the first
+    ///         dynamic-quorum checkpoint. initialize() seeds a checkpoint, so this is inert in
+    ///         normal operation; dynamic quorum is the source of truth.
     function setQuorumVotesBPS(uint256 newQuorumVotesBPS) external onlyAdmin {
         ds.quorumVotesBPS = newQuorumVotesBPS;
     }
 
     function setLastMinuteWindowInBlocks(uint32 newLastMinuteWindowInBlocks) external onlyAdmin {
+        if (newLastMinuteWindowInBlocks > MAX_LAST_MINUTE_WINDOW_BLOCKS) revert InvalidPeriod();
         ds.lastMinuteWindowInBlocks = newLastMinuteWindowInBlocks;
     }
+
+    function setProposalUpdatablePeriodInBlocks(uint256 newPeriod) external onlyAdmin {
+        if (newPeriod > MAX_UPDATABLE_PERIOD_BLOCKS) revert InvalidPeriod();
+        ds.proposalUpdatablePeriodInBlocks = newPeriod;
+    }
+
+    function setProposalQueuePeriodInBlocks(uint256 newPeriod) external onlyAdmin {
+        if (newPeriod == 0 || newPeriod > MAX_QUEUE_PERIOD_BLOCKS) revert InvalidPeriod();
+        ds.proposalQueuePeriodInBlocks = newPeriod;
+    }
+
+    function proposalUpdatablePeriodInBlocks() external view returns (uint256) { return ds.proposalUpdatablePeriodInBlocks; }
+    function proposalQueuePeriodInBlocks() external view returns (uint256) { return ds.proposalQueuePeriodInBlocks; }
 
     /// @notice Set the GovernanceRewards contract. Callable once.
     function setGovernanceRewards(address _gr) external onlyAdmin {
@@ -299,6 +434,7 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
     }
 
     function setObjectionPeriodDurationInBlocks(uint32 newObjectionPeriodDurationInBlocks) external onlyAdmin {
+        if (newObjectionPeriodDurationInBlocks > MAX_OBJECTION_PERIOD_BLOCKS) revert InvalidPeriod();
         ds.objectionPeriodDurationInBlocks = newObjectionPeriodDurationInBlocks;
     }
 
@@ -353,7 +489,25 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
         uint16 newMinQuorumVotesBPS,
         uint16 newMaxQuorumVotesBPS,
         uint32 newQuorumCoefficient
-    ) external onlyAdmin {
+    ) public onlyAdmin {
+        _setDynamicQuorumParams(newMinQuorumVotesBPS, newMaxQuorumVotesBPS, newQuorumCoefficient);
+    }
+
+    /// @dev Bounds-checked checkpoint write. Internal so initialize() can seed before `admin` is
+    ///      effectively the caller (avoids the onlyAdmin gate during construction).
+    function _setDynamicQuorumParams(
+        uint16 newMinQuorumVotesBPS,
+        uint16 newMaxQuorumVotesBPS,
+        uint32 newQuorumCoefficient
+    ) internal {
+        if (
+            newMinQuorumVotesBPS < MIN_QUORUM_VOTES_BPS_LOWER_BOUND ||
+            newMinQuorumVotesBPS > MIN_QUORUM_VOTES_BPS_UPPER_BOUND
+        ) revert InvalidMinQuorumVotesBPS();
+        if (newMaxQuorumVotesBPS > MAX_QUORUM_VOTES_BPS_UPPER_BOUND) revert InvalidMaxQuorumVotesBPS();
+        if (newMinQuorumVotesBPS > newMaxQuorumVotesBPS) revert MinQuorumBPSGreaterThanMaxQuorumBPS();
+
+        ShwounsDAOTypes.DynamicQuorumParams memory old = _latestDynamicQuorumParams();
         _writeQuorumParamsCheckpoint(
             ShwounsDAOTypes.DynamicQuorumParams({
                 minQuorumVotesBPS: newMinQuorumVotesBPS,
@@ -361,9 +515,47 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
                 quorumCoefficient: newQuorumCoefficient
             })
         );
-        emit MinQuorumVotesBPSSet(0, newMinQuorumVotesBPS);
-        emit MaxQuorumVotesBPSSet(0, newMaxQuorumVotesBPS);
-        emit QuorumCoefficientSet(0, newQuorumCoefficient);
+        emit MinQuorumVotesBPSSet(old.minQuorumVotesBPS, newMinQuorumVotesBPS);
+        emit MaxQuorumVotesBPSSet(old.maxQuorumVotesBPS, newMaxQuorumVotesBPS);
+        emit QuorumCoefficientSet(old.quorumCoefficient, newQuorumCoefficient);
+    }
+
+    function _latestDynamicQuorumParams()
+        internal
+        view
+        returns (ShwounsDAOTypes.DynamicQuorumParams memory)
+    {
+        uint256 len = ds.quorumParamsCheckpoints.length;
+        if (len == 0) return ShwounsDAOTypes.DynamicQuorumParams(0, 0, 0);
+        return ds.quorumParamsCheckpoints[len - 1].params;
+    }
+
+    // -- Individual dynamic-quorum setters (V4 parity; each writes a new checkpoint via the
+    //    bounds-checked combined setter, leaving the other two params unchanged) --
+
+    function setMinQuorumVotesBPS(uint16 newMinQuorumVotesBPS) external {
+        ShwounsDAOTypes.DynamicQuorumParams memory p = _latestDynamicQuorumParams();
+        setDynamicQuorumParams(newMinQuorumVotesBPS, p.maxQuorumVotesBPS, p.quorumCoefficient);
+    }
+
+    function setMaxQuorumVotesBPS(uint16 newMaxQuorumVotesBPS) external {
+        ShwounsDAOTypes.DynamicQuorumParams memory p = _latestDynamicQuorumParams();
+        setDynamicQuorumParams(p.minQuorumVotesBPS, newMaxQuorumVotesBPS, p.quorumCoefficient);
+    }
+
+    function setQuorumCoefficient(uint32 newQuorumCoefficient) external {
+        ShwounsDAOTypes.DynamicQuorumParams memory p = _latestDynamicQuorumParams();
+        setDynamicQuorumParams(p.minQuorumVotesBPS, p.maxQuorumVotesBPS, newQuorumCoefficient);
+    }
+
+    /// @notice Current minimum quorum in absolute votes (minQuorumVotesBPS of total supply).
+    function minQuorumVotes() external view returns (uint256) {
+        return (ds.shwouns.totalSupply() * _latestDynamicQuorumParams().minQuorumVotesBPS) / 10000;
+    }
+
+    /// @notice Current maximum quorum in absolute votes (maxQuorumVotesBPS of total supply).
+    function maxQuorumVotes() external view returns (uint256) {
+        return (ds.shwouns.totalSupply() * _latestDynamicQuorumParams().maxQuorumVotesBPS) / 10000;
     }
 
     function _writeQuorumParamsCheckpoint(ShwounsDAOTypes.DynamicQuorumParams memory params) internal {
@@ -380,8 +572,32 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
         }
     }
 
+    /// @notice The quorum (in votes) required for a proposal, accounting for dynamic quorum and
+    ///         the fixed-quorum fallback for proposals created before the first checkpoint.
+    function quorumVotes(uint256 proposalId) external view returns (uint256) {
+        return ds.quorumVotes(proposalId);
+    }
+
+    /// @notice Flat, mapping-free view of a proposal (id, votes, lifecycle, signers, state).
+    function proposals(uint256 proposalId) external view returns (ShwounsDAOTypes.ProposalCondensed memory) {
+        return ds.proposals(proposalId);
+    }
+
+    /// @notice The current proposal threshold in absolute votes (proposalThresholdBPS of supply).
+    function proposalThreshold() external view returns (uint256) {
+        return (ds.shwouns.totalSupply() * ds.proposalThresholdBPS) / 10000;
+    }
+
     function getDynamicQuorumParamsCheckpointCount() external view returns (uint256) {
         return ds.quorumParamsCheckpoints.length;
+    }
+
+    function getDynamicQuorumParamsAt(uint256 blockNumber)
+        external
+        view
+        returns (ShwounsDAOTypes.DynamicQuorumParams memory)
+    {
+        return ds.getDynamicQuorumParamsAt(blockNumber);
     }
 
     function getDynamicQuorumParamsCheckpoint(uint256 index)

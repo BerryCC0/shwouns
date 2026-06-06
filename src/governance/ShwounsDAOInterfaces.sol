@@ -125,6 +125,18 @@ interface ShwounsDAOTypes {
         /// @notice Cancelled signatures: signer => keccak(sig) => true. Used by proposeBySigs
         ///         to reject sigs that the signer has explicitly invalidated.
         mapping(address => mapping(bytes32 => bool)) cancelledSigs;
+        // -- Appended for proposal editing + queue-deadline (append-only; do not reorder) --
+        /// @notice The pre-voting window (in blocks) during which a proposal is editable
+        ///         (Updatable state). 0 = no edit window (proposals open directly to Pending).
+        uint256 proposalUpdatablePeriodInBlocks;
+        /// @notice How long after voting ends (in blocks) a Succeeded proposal may still be
+        ///         queued before it becomes Expired. Shwouns policy (Nouns leaves it indefinite).
+        uint256 proposalQueuePeriodInBlocks;
+        /// @notice Reserved slots for future upgrades. This Storage struct sits at slot 0 of the
+        ///         UUPS proxy, FOLLOWED by inherited OpenZeppelin storage — so new fields must be
+        ///         appended HERE (consuming the gap), never after `ds`, or they would shift the
+        ///         inherited slots. Decrement the gap size by the number of slots you add.
+        uint256[50] __gap;
     }
 
     // --------------------------------------------------------------------------
@@ -155,6 +167,10 @@ interface ShwounsDAOTypes {
         uint64 objectionPeriodEndBlock;
         /// @notice Co-signers when created via proposeBySigs. Empty for normal propose().
         address[] signers;
+        // -- Appended for proposal editing (append-only; do not reorder) --
+        /// @notice Last block on which this proposal can be edited. While block.number <= this,
+        ///         the proposal is Updatable; voting (startBlock) begins after it.
+        uint256 updatePeriodEndBlock;
     }
 
     /// @notice EIP-712 signature payload for proposeBySigs.
@@ -190,12 +206,52 @@ interface ShwounsDAOTypes {
         mapping(uint256 => bool) vaultCollected;
         /// @notice Whether finalize() has succeeded for this proposal.
         bool finalized;
+        // -- Appended for the Phase 0.0 lifecycle redesign (append-only; do not reorder) --
+        /// @notice Vault-ID set frozen at queue() (C1). recordSnapshot pages over THIS stable
+        ///         list, not the live registry active-set, so mid-snapshot deposits/withdrawals
+        ///         cannot skip, duplicate, or brick iteration. Guarantee: "vault-set frozen at
+        ///         queue; balances sampled during snapshot paging" — NOT a historical balance
+        ///         checkpoint (a withdrawal before a vault's page is processed reduces funding).
+        uint256[] frozenVaultIds;
+        /// @notice Actually-collected amount per asset for THIS proposal (C4). finalize requires
+        ///         collected[asset] >= requestedAmount[asset] for every asset; refunds use this
+        ///         so a proposal can never spend or refund another proposal's funds.
+        mapping(address => uint256) collected;
+        /// @notice True once queue() has run. Distinguishes a queued zero-funding proposal
+        ///         (snapshotTargetCount == 0) from a never-queued one (C3).
+        bool queued;
     }
 
     struct Receipt {
         bool hasVoted;
         uint8 support;
         uint96 votes;
+    }
+
+    /// @notice Flat, mapping-free view of a proposal for indexers/UIs. Shwouns-native: no clientId
+    ///         or fork fields; adds the editing/objection/snapshot-collect lifecycle data.
+    struct ProposalCondensed {
+        uint256 id;
+        address proposer;
+        uint256 proposalThreshold;
+        uint256 quorumVotes;
+        uint256 startBlock;
+        uint256 endBlock;
+        uint256 updatePeriodEndBlock;
+        uint256 objectionPeriodEndBlock;
+        uint256 forVotes;
+        uint256 againstVotes;
+        uint256 abstainVotes;
+        bool canceled;
+        bool vetoed;
+        bool executed;
+        uint256 totalSupply;
+        uint256 creationBlock;
+        address[] signers;
+        uint256 snapshotTargetCount;
+        uint256 snapshotProgress;
+        uint256 collectProgress;
+        ProposalState state;
     }
 
     struct DynamicQuorumParams {
@@ -213,6 +269,8 @@ interface ShwounsDAOTypes {
         uint256 votingPeriod;
         uint256 votingDelay;
         uint256 proposalThresholdBPS;
+        uint256 proposalUpdatablePeriodInBlocks;
+        uint256 proposalQueuePeriodInBlocks;
     }
 
     /// @notice All possible proposal lifecycle states.
@@ -227,8 +285,9 @@ interface ShwounsDAOTypes {
         Collected,       // 7  collect phase complete; finalize pending
         Executed,        // 8  finalize() succeeded; proposal done
         Vetoed,          // 9  vetoed
-        Expired,         // 10 succeeded but never queued in time
-        ObjectionPeriod  // 11 last-minute For-flip extended voting; only Against votes accepted
+        Expired,         // 10 succeeded but never queued before queueDeadlineBlock (wired in E)
+        ObjectionPeriod, // 11 last-minute For-flip extended voting; only Against votes accepted
+        Updatable        // 12 pre-voting edit window (wired in E); appended — never renumber
     }
 }
 

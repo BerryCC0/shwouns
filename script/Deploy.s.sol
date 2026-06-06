@@ -77,6 +77,8 @@ contract Deploy is Script {
         uint256 votingDelay;
         uint256 votingPeriod;
         uint256 proposalThresholdBPS;
+        uint256 proposalUpdatablePeriodInBlocks;
+        uint256 proposalQueuePeriodInBlocks;
         uint256 quorumVotesBPS;
         uint256 giMintPrice;
         uint256 proposalReward;
@@ -126,6 +128,8 @@ contract Deploy is Script {
         c.votingDelay = vm.envOr("VOTING_DELAY_BLOCKS", uint256(7200));
         c.votingPeriod = vm.envOr("VOTING_PERIOD_BLOCKS", uint256(36000));
         c.proposalThresholdBPS = vm.envOr("PROPOSAL_THRESHOLD_BPS", uint256(25));
+        c.proposalUpdatablePeriodInBlocks = vm.envOr("PROPOSAL_UPDATABLE_PERIOD_BLOCKS", uint256(0));
+        c.proposalQueuePeriodInBlocks = vm.envOr("PROPOSAL_QUEUE_PERIOD_BLOCKS", uint256(50400));
         c.quorumVotesBPS = vm.envOr("QUORUM_VOTES_BPS", uint256(1000));
         c.giMintPrice = vm.envOr("GI_MINT_PRICE_WEI", uint256(0.01 ether));
         c.proposalReward = vm.envOr("PROPOSAL_REWARD_WEI", uint256(0.1 ether));
@@ -241,7 +245,16 @@ contract Deploy is Script {
         ShwounsDAOTypes.ShwounsDAOParams memory daoParams = ShwounsDAOTypes.ShwounsDAOParams({
             votingPeriod: cfg.votingPeriod,
             votingDelay: cfg.votingDelay,
-            proposalThresholdBPS: cfg.proposalThresholdBPS
+            proposalThresholdBPS: cfg.proposalThresholdBPS,
+            proposalUpdatablePeriodInBlocks: cfg.proposalUpdatablePeriodInBlocks,
+            proposalQueuePeriodInBlocks: cfg.proposalQueuePeriodInBlocks
+        });
+        // Seed dynamic quorum: min = configured quorum BPS (legacy fixed-quorum fallback tracks
+        // the min), max = 6000, coefficient = 0. The min must be in [200, 2000].
+        ShwounsDAOTypes.DynamicQuorumParams memory daoQuorum = ShwounsDAOTypes.DynamicQuorumParams({
+            minQuorumVotesBPS: uint16(cfg.quorumVotesBPS),
+            maxQuorumVotesBPS: 6000,
+            quorumCoefficient: 0
         });
         // Initialize DAO with THIS Deploy contract as admin so subsequent setX calls work.
         // We hand off admin to cfg.adminTarget at the end of _deploy via setPendingAdmin.
@@ -252,7 +265,7 @@ contract Deploy is Script {
             IShwounsTokenLike(address(d.token)),
             d.vaultRegistry,
             daoParams,
-            cfg.quorumVotesBPS
+            daoQuorum
         );
         d.dao = ShwounsDAOLogic(
             payable(address(new ERC1967Proxy(address(d.daoImpl), daoInit)))

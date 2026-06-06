@@ -3,6 +3,7 @@ pragma solidity ^0.8.19;
 
 import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 import {ShwounsToken} from "../../src/token/ShwounsToken.sol";
 import {ShwounsSeeder} from "../../src/token/ShwounsSeeder.sol";
@@ -38,7 +39,7 @@ contract DAOTestBase is Test {
     ShwounsVault bobVault;
     ShwounsVault carolVault;
 
-    function _deploy(uint256 votingDelay_, uint256 votingPeriod_, uint256 quorumBPS_) internal {
+    function _deploy(uint256 votingDelay_, uint256 votingPeriod_) internal {
         ERC6551Registry tmp = new ERC6551Registry();
         vm.etch(CANONICAL_REGISTRY, address(tmp).code);
 
@@ -53,7 +54,13 @@ contract DAOTestBase is Test {
         ShwounsDAOTypes.ShwounsDAOParams memory params = ShwounsDAOTypes.ShwounsDAOParams({
             votingPeriod: votingPeriod_,
             votingDelay: votingDelay_,
-            proposalThresholdBPS: 0
+            proposalThresholdBPS: 1, // min allowed; threshold = 0 at this small supply
+            proposalUpdatablePeriodInBlocks: 0,
+            proposalQueuePeriodInBlocks: 50400
+        });
+        // Dynamic quorum is seeded at init; the old fixed-quorum BPS arg is gone.
+        ShwounsDAOTypes.DynamicQuorumParams memory dq = ShwounsDAOTypes.DynamicQuorumParams({
+            minQuorumVotesBPS: 200, maxQuorumVotesBPS: 6000, quorumCoefficient: 0
         });
         bytes memory initData = abi.encodeWithSelector(
             ShwounsDAOLogic.initialize.selector,
@@ -62,7 +69,7 @@ contract DAOTestBase is Test {
             IShwounsTokenLike(address(token)),
             registry,
             params,
-            quorumBPS_
+            dq
         );
         ERC1967Proxy daoProxy = new ERC1967Proxy(address(daoImpl), initData);
         dao = ShwounsDAOLogic(payable(address(daoProxy)));
@@ -122,7 +129,7 @@ contract DAOTestBase is Test {
 
 contract DAOAdminTest is DAOTestBase {
     function setUp() public {
-        _deploy(1, 5, 1000);
+        _deploy(1, 7200);
     }
 
     function test_setVotingDelay_byAdmin() public {
@@ -137,8 +144,9 @@ contract DAOAdminTest is DAOTestBase {
     }
 
     function test_setVotingPeriod_byAdmin() public {
-        dao.setVotingPeriod(100);
-        assertEq(dao.votingPeriod(), 100);
+        // setVotingPeriod enforces [MIN_VOTING_PERIOD_BLOCKS, MAX_VOTING_PERIOD_BLOCKS] = [7200, 100800].
+        dao.setVotingPeriod(8000);
+        assertEq(dao.votingPeriod(), 8000);
     }
 
     function test_setQuorumVotesBPS_byAdmin() public {
@@ -184,7 +192,7 @@ contract DAOAdminTest is DAOTestBase {
 
 contract DAODynamicQuorumTest is DAOTestBase {
     function setUp() public {
-        _deploy(1, 5, 0); // base quorum 0 — rely on dynamic
+        _deploy(1, 7200); // dynamic quorum seeded at init (min 200 bps)
         dao.setDynamicQuorumParams({
             newMinQuorumVotesBPS: 1000,   // 10%
             newMaxQuorumVotesBPS: 4000,   // 40%
@@ -200,7 +208,7 @@ contract DAODynamicQuorumTest is DAOTestBase {
         uint256 pid = dao.propose(t, v, s, c, "test");
         vm.roll(block.number + 2);
         vm.prank(alice); dao.castVote(pid, 1);
-        vm.roll(block.number + 6);
+        vm.roll(block.number + 7201);
 
         // 3 Shwouns total, minBPS=1000 → ceil(3*1000/10000) = 0 (integer div)
         // forVotes = 1, quorumVotes = 0, so passes
@@ -220,7 +228,7 @@ contract DAODynamicQuorumTest is DAOTestBase {
         // bob votes against (1 vote against), alice votes for (1 vote for)
         vm.prank(alice); dao.castVote(pid, 1);
         vm.prank(bob); dao.castVote(pid, 0);
-        vm.roll(block.number + 6);
+        vm.roll(block.number + 7201);
 
         // Quorum math:
         //   totalSupply = 3
@@ -239,12 +247,55 @@ contract DAODynamicQuorumTest is DAOTestBase {
 }
 
 // =============================================================================
+// Dynamic quorum safety: retroactive-zero regression + setter bounds (0.3)
+// =============================================================================
+
+contract DAOQuorumSafetyTest is DAOTestBase {
+    function setUp() public {
+        _deploy(1, 7200); // dynamic quorum seeded at init (checkpoint 0 always created)
+    }
+
+    /// initialize seeds the first dynamic-quorum checkpoint (checkpoint 0) at deploy, so dynamic
+    /// quorum is live from block 0. (The old "proposal created before the first checkpoint"
+    /// scenario is now unreachable — there is always a checkpoint.)
+    function test_initSeedsDynamicQuorumCheckpoint() public {
+        assertEq(dao.getDynamicQuorumParamsCheckpointCount(), 1, "init seeds one checkpoint");
+    }
+
+    function test_setDynamicQuorumParams_revertsMinBelowLowerBound() public {
+        vm.expectRevert(ShwounsDAOLogic.InvalidMinQuorumVotesBPS.selector);
+        dao.setDynamicQuorumParams(199, 4000, 0);
+    }
+
+    function test_setDynamicQuorumParams_revertsMinAboveUpperBound() public {
+        vm.expectRevert(ShwounsDAOLogic.InvalidMinQuorumVotesBPS.selector);
+        dao.setDynamicQuorumParams(2001, 4000, 0);
+    }
+
+    function test_setDynamicQuorumParams_revertsMaxAboveUpperBound() public {
+        vm.expectRevert(ShwounsDAOLogic.InvalidMaxQuorumVotesBPS.selector);
+        dao.setDynamicQuorumParams(1000, 6001, 0);
+    }
+
+    function test_setDynamicQuorumParams_revertsMinGreaterThanMax() public {
+        vm.expectRevert(ShwounsDAOLogic.MinQuorumBPSGreaterThanMaxQuorumBPS.selector);
+        dao.setDynamicQuorumParams(2000, 1000, 0);
+    }
+
+    function test_setDynamicQuorumParams_acceptsValidBounds() public {
+        // init already seeded checkpoint 0; this setter adds checkpoint 1 → count == 2.
+        dao.setDynamicQuorumParams(200, 6000, 1_000_000);
+        assertEq(dao.getDynamicQuorumParamsCheckpointCount(), 2);
+    }
+}
+
+// =============================================================================
 // Stuck-fund recovery test
 // =============================================================================
 
 contract DAORefundStuckTest is DAOTestBase {
     function setUp() public {
-        _deploy(1, 5, 1000);
+        _deploy(1, 7200);
     }
 
     function test_refundStuckProposal_returnsFundsToCurrentOwners() public {
@@ -265,7 +316,7 @@ contract DAORefundStuckTest is DAOTestBase {
         vm.prank(alice); dao.castVote(pid, 1);
         vm.prank(bob); dao.castVote(pid, 1);
         vm.prank(carol); dao.castVote(pid, 1);
-        vm.roll(block.number + 6);
+        vm.roll(block.number + 7201);
 
         dao.queue(pid);
         dao.recordSnapshot(pid, 10);
@@ -274,7 +325,7 @@ contract DAORefundStuckTest is DAOTestBase {
         vaultIds[0] = aliceNoun;
         vaultIds[1] = bobNoun;
         vaultIds[2] = carolNoun;
-        dao.collect(pid, vaultIds);
+        dao.collect(pid, vaultIds.length);
 
         // Finalize reverts
         vm.expectRevert();
@@ -313,10 +364,12 @@ contract RevertingTarget {
 
 contract DAOObjectionPeriodTest is DAOTestBase {
     function setUp() public {
-        _deploy(1, 10, 1000);
-        // 3-block last-minute window, 5-block extension
-        dao.setLastMinuteWindowInBlocks(3);
-        dao.setObjectionPeriodDurationInBlocks(5);
+        _deploy(1, 7200);
+        // votingPeriod is now 7200, so endBlock = startBlock + 7200. Use a 10-block last-minute
+        // window and a 50-block objection extension; the rolls below land the flipping For-vote
+        // inside the final 10 blocks of voting, then advance just past endBlock into the objection.
+        dao.setLastMinuteWindowInBlocks(10);
+        dao.setObjectionPeriodDurationInBlocks(50);
     }
 
     function test_forVoteInLastMinute_triggersObjectionPeriod() public {
@@ -330,14 +383,17 @@ contract DAOObjectionPeriodTest is DAOTestBase {
         vm.prank(bob); dao.castVote(pid, 0);
         vm.prank(carol); dao.castVote(pid, 1);
 
-        // Jump to last-minute window (within 3 blocks of endBlock)
-        vm.roll(block.number + 8);
+        // Jump to last-minute window (within 10 blocks of endBlock). After propose at block C,
+        // startBlock = C+1, endBlock = C+7201. We're at C+2 here; +7198 lands at C+7200.
+        vm.roll(block.number + 7198);
 
         // Alice votes For — this is the FLIP from failing (1-1 tie) to succeeding (2-1)
         vm.prank(alice); dao.castVote(pid, 1);
 
-        // Should have triggered objection period; after endBlock we should see ObjectionPeriod state
-        vm.roll(block.number + 3); // past original endBlock
+        // Should have triggered objection period; after endBlock we should see ObjectionPeriod state.
+        // Now at C+7200; +5 → C+7205, which is past endBlock (C+7201) and inside the objection
+        // window (ends C+7201+50 = C+7251).
+        vm.roll(block.number + 5);
         assertEq(uint256(dao.state(pid)), uint256(ShwounsDAOTypes.ProposalState.ObjectionPeriod));
     }
 
@@ -356,12 +412,13 @@ contract DAOObjectionPeriodTest is DAOTestBase {
         uint256 pid = dao.propose(t, v, s, c, "obj");
         vm.roll(block.number + 2);
 
-        // Pattern: bob against, alice for (1-1 tie failing), then last-minute carol for triggers
+        // Pattern: bob against, alice for (1-1 tie failing), then last-minute carol for triggers.
+        // After propose at block C, startBlock = C+1, endBlock = C+7201; we're at C+2 here.
         vm.prank(bob); dao.castVote(pid, 0);
         vm.prank(alice); dao.castVote(pid, 1);
-        vm.roll(block.number + 8);
+        vm.roll(block.number + 7198); // → C+7200, inside the 10-block last-minute window
         vm.prank(carol); dao.castVote(pid, 1);
-        vm.roll(block.number + 3); // now in objection period
+        vm.roll(block.number + 5); // → C+7205, now in objection period (ends C+7251)
 
         assertEq(uint256(dao.state(pid)), uint256(ShwounsDAOTypes.ProposalState.ObjectionPeriod));
 
@@ -383,7 +440,7 @@ contract DAOMultiAssetTest is DAOTestBase {
     MockERC20 usdc;
 
     function setUp() public {
-        _deploy(1, 5, 1000);
+        _deploy(1, 7200);
         usdc = new MockERC20();
 
         // Fund vaults with USDC
@@ -412,7 +469,7 @@ contract DAOMultiAssetTest is DAOTestBase {
         vm.prank(alice); dao.castVote(pid, 1);
         vm.prank(bob); dao.castVote(pid, 1);
         vm.prank(carol); dao.castVote(pid, 1);
-        vm.roll(block.number + 6);
+        vm.roll(block.number + 7201);
 
         dao.queue(pid);
 
@@ -427,7 +484,7 @@ contract DAOMultiAssetTest is DAOTestBase {
         vaultIds[0] = aliceNoun;
         vaultIds[1] = bobNoun;
         vaultIds[2] = carolNoun;
-        dao.collect(pid, vaultIds);
+        dao.collect(pid, vaultIds.length);
 
         // Pro-rata: total = 350, requested = 175, so half pulled from each
         // alice contributes 175 * 100/350 = 50
@@ -438,6 +495,43 @@ contract DAOMultiAssetTest is DAOTestBase {
 
         dao.finalize(pid);
         assertEq(usdc.balanceOf(recipient), 175e18);
+    }
+
+    /// 0.2: the GovernorBravo signature-string encoding (function in `signature`, args-only
+    /// `calldata` with NO selector) must be detected by snapshot/collect AND executed by finalize,
+    /// identically to the selector-in-calldata form. Without the fix the asset goes undetected
+    /// (unfunded) and the raw call is malformed.
+    function test_proposalWithERC20Transfer_signatureForm_detectsAndExecutes() public {
+        address recipient = makeAddr("usdcRecip2");
+        address[] memory targets = new address[](1);
+        uint256[] memory values = new uint256[](1);
+        string[] memory sigs = new string[](1);
+        bytes[] memory cd = new bytes[](1);
+        targets[0] = address(usdc);
+        values[0] = 0;
+        sigs[0] = "transfer(address,uint256)"; // function as signature
+        cd[0] = abi.encode(recipient, 175e18);  // args only — NO selector prefix
+
+        vm.prank(alice);
+        uint256 pid = dao.propose(targets, values, sigs, cd, "usdc sig-form");
+        vm.roll(block.number + 2);
+        vm.prank(alice); dao.castVote(pid, 1);
+        vm.prank(bob); dao.castVote(pid, 1);
+        vm.prank(carol); dao.castVote(pid, 1);
+        vm.roll(block.number + 7201);
+
+        dao.queue(pid);
+
+        address[] memory assets = dao.assetsForProposal(pid);
+        assertEq(assets.length, 1, "USDC detected via signature form");
+        assertEq(assets[0], address(usdc));
+
+        dao.recordSnapshot(pid, 10);
+        dao.collect(pid, 10);
+        assertEq(usdc.balanceOf(address(dao)), 175e18, "collected 175 USDC");
+
+        dao.finalize(pid);
+        assertEq(usdc.balanceOf(recipient), 175e18, "signature-form transfer executed");
     }
 }
 
@@ -475,11 +569,18 @@ contract DAOSignedProposalsTest is Test {
 
         ShwounsDAOLogic daoImpl = new ShwounsDAOLogic();
         ShwounsDAOTypes.ShwounsDAOParams memory params = ShwounsDAOTypes.ShwounsDAOParams({
-            votingPeriod: 5,
+            votingPeriod: 7200,
             votingDelay: 1,
-            // Threshold: 6000 BPS = 60% of supply. With 3 supply, threshold = 1.8 → integer 1.
-            // So 2 signers together (2 votes) clear it; 1 signer alone (1 vote) doesn't.
-            proposalThresholdBPS: 6000
+            // proposalThresholdBPS is now bounded to [1, 1000]. With total supply == 10,
+            // threshold = bps2Uint(1000, 10) = 1. Nouns semantics require votes STRICTLY
+            // greater than the threshold, so 2 signers together (2 > 1) clear it; 1 signer
+            // alone (1 <= 1) does not. Filler Shwouns (below) bring supply to exactly 10.
+            proposalThresholdBPS: 1000,
+            proposalUpdatablePeriodInBlocks: 0,
+            proposalQueuePeriodInBlocks: 50400
+        });
+        ShwounsDAOTypes.DynamicQuorumParams memory dq = ShwounsDAOTypes.DynamicQuorumParams({
+            minQuorumVotesBPS: 200, maxQuorumVotesBPS: 6000, quorumCoefficient: 0
         });
         bytes memory initData = abi.encodeWithSelector(
             ShwounsDAOLogic.initialize.selector,
@@ -488,7 +589,7 @@ contract DAOSignedProposalsTest is Test {
             IShwounsTokenLike(address(token)),
             registry,
             params,
-            1000
+            dq
         );
         ERC1967Proxy daoProxy = new ERC1967Proxy(address(daoImpl), initData);
         dao = ShwounsDAOLogic(payable(address(daoProxy)));
@@ -506,18 +607,31 @@ contract DAOSignedProposalsTest is Test {
         vm.prank(sigAlice); token.delegate(sigAlice);
         vm.prank(sigBob); token.delegate(sigBob);
         vm.prank(sigCarol); token.delegate(sigCarol);
+
+        // Bring total supply to exactly 10 so the threshold = bps2Uint(1000, 10) = 1.
+        // After the 3 signer mints, supply is 4 (tokens 0..3); 6 more mints reach 10
+        // (tokens 4..9, no founder reward until id 10). The filler does NOT sign and is
+        // NOT delegated — these Shwouns only inflate totalSupply for the threshold math.
+        address filler = makeAddr("filler");
+        for (uint256 i = 0; i < 6; i++) {
+            uint256 fid = token.mint();
+            token.transferFrom(address(this), filler, fid);
+        }
         vm.roll(block.number + 1);
     }
 
     function _signProposal(
         uint256 pk,
+        address proposer,
         address[] memory targets,
         uint256[] memory values,
         string[] memory signatures,
         bytes[] memory calldatas,
-        string memory description
+        string memory description,
+        uint256 expirationTimestamp
     ) internal view returns (bytes memory) {
-        bytes32 digest = dao.proposalDigest(targets, values, signatures, calldatas, description);
+        bytes32 digest =
+            dao.proposalDigest(proposer, targets, values, signatures, calldatas, description, expirationTimestamp);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
@@ -531,16 +645,19 @@ contract DAOSignedProposalsTest is Test {
         targets[0] = recipient;
         values[0] = 1 ether;
 
-        // Both sigAlice and sigBob sign the proposal
-        bytes memory aliceSig = _signProposal(sigAlicePk, targets, values, sigs, cd, "signed proposal");
-        bytes memory bobSig = _signProposal(sigBobPk, targets, values, sigs, cd, "signed proposal");
+        // Both sigAlice and sigBob sign the proposal; proposer = this contract (= msg.sender).
+        uint256 expiry = block.timestamp + 1 days;
+        bytes memory aliceSig =
+            _signProposal(sigAlicePk, address(this), targets, values, sigs, cd, "signed proposal", expiry);
+        bytes memory bobSig =
+            _signProposal(sigBobPk, address(this), targets, values, sigs, cd, "signed proposal", expiry);
 
         ShwounsDAOTypes.ProposerSignature[] memory proposerSigs = new ShwounsDAOTypes.ProposerSignature[](2);
         proposerSigs[0] = ShwounsDAOTypes.ProposerSignature({
-            sig: aliceSig, signer: sigAlice, expirationTimestamp: block.timestamp + 1 days
+            sig: aliceSig, signer: sigAlice, expirationTimestamp: expiry
         });
         proposerSigs[1] = ShwounsDAOTypes.ProposerSignature({
-            sig: bobSig, signer: sigBob, expirationTimestamp: block.timestamp + 1 days
+            sig: bobSig, signer: sigBob, expirationTimestamp: expiry
         });
 
         uint256 pid = dao.proposeBySigs(proposerSigs, targets, values, sigs, cd, "signed proposal");
@@ -561,14 +678,16 @@ contract DAOSignedProposalsTest is Test {
         targets[0] = makeAddr("recip");
         values[0] = 1 ether;
 
-        bytes memory aliceSig = _signProposal(sigAlicePk, targets, values, sigs, cd, "lone signer");
+        uint256 expiry = block.timestamp + 1 days;
+        bytes memory aliceSig =
+            _signProposal(sigAlicePk, address(this), targets, values, sigs, cd, "lone signer", expiry);
         ShwounsDAOTypes.ProposerSignature[] memory proposerSigs = new ShwounsDAOTypes.ProposerSignature[](1);
         proposerSigs[0] = ShwounsDAOTypes.ProposerSignature({
-            sig: aliceSig, signer: sigAlice, expirationTimestamp: block.timestamp + 1 days
+            sig: aliceSig, signer: sigAlice, expirationTimestamp: expiry
         });
 
-        // totalSupply = 4 (founder 0 + auction 1-3). threshold = 4 * 6000 / 10000 = 2.
-        // Single signer has 1 vote, 1 < 2 → must revert.
+        // totalSupply = 10 (founder 0 + auction 1-3 + 6 filler). threshold = bps2Uint(1000, 10) = 1.
+        // Single signer has 1 vote; 1 <= 1 (Nouns semantics) → must revert.
         vm.expectRevert(ShwounsDAOProposals.SignersBelowThreshold.selector);
         dao.proposeBySigs(proposerSigs, targets, values, sigs, cd, "lone signer");
     }
@@ -581,8 +700,11 @@ contract DAOSignedProposalsTest is Test {
         targets[0] = makeAddr("recip");
         values[0] = 1 ether;
 
-        bytes memory aliceSig = _signProposal(sigAlicePk, targets, values, sigs, cd, "cancel test");
-        bytes memory bobSig = _signProposal(sigBobPk, targets, values, sigs, cd, "cancel test");
+        uint256 expiry = block.timestamp + 1 days;
+        bytes memory aliceSig =
+            _signProposal(sigAlicePk, address(this), targets, values, sigs, cd, "cancel test", expiry);
+        bytes memory bobSig =
+            _signProposal(sigBobPk, address(this), targets, values, sigs, cd, "cancel test", expiry);
 
         // Alice cancels her sig before submission
         vm.prank(sigAlice);
@@ -590,10 +712,10 @@ contract DAOSignedProposalsTest is Test {
 
         ShwounsDAOTypes.ProposerSignature[] memory proposerSigs = new ShwounsDAOTypes.ProposerSignature[](2);
         proposerSigs[0] = ShwounsDAOTypes.ProposerSignature({
-            sig: aliceSig, signer: sigAlice, expirationTimestamp: block.timestamp + 1 days
+            sig: aliceSig, signer: sigAlice, expirationTimestamp: expiry
         });
         proposerSigs[1] = ShwounsDAOTypes.ProposerSignature({
-            sig: bobSig, signer: sigBob, expirationTimestamp: block.timestamp + 1 days
+            sig: bobSig, signer: sigBob, expirationTimestamp: expiry
         });
 
         vm.expectRevert(ShwounsDAOProposals.SigCancelled.selector);
@@ -608,15 +730,107 @@ contract DAOSignedProposalsTest is Test {
         targets[0] = makeAddr("recip");
         values[0] = 1 ether;
 
-        bytes memory aliceSig = _signProposal(sigAlicePk, targets, values, sigs, cd, "expired");
+        // Sign over an already-expired timestamp that MATCHES the struct, so the signature is
+        // valid and the expiry check (not the signature check) is what reverts.
+        uint256 expiry = block.timestamp - 1;
+        bytes memory aliceSig =
+            _signProposal(sigAlicePk, address(this), targets, values, sigs, cd, "expired", expiry);
 
         ShwounsDAOTypes.ProposerSignature[] memory proposerSigs = new ShwounsDAOTypes.ProposerSignature[](1);
         proposerSigs[0] = ShwounsDAOTypes.ProposerSignature({
-            sig: aliceSig, signer: sigAlice, expirationTimestamp: block.timestamp - 1
+            sig: aliceSig, signer: sigAlice, expirationTimestamp: expiry
         });
 
         vm.expectRevert(ShwounsDAOProposals.SigExpired.selector);
         dao.proposeBySigs(proposerSigs, targets, values, sigs, cd, "expired");
+    }
+
+    /// 0.1: a relayer cannot extend a signature's expiry. Signing over one expiry and submitting
+    /// a later one changes the digest, so the signature no longer verifies (it is NOT just an
+    /// expiry-check failure — the binding makes the swapped signature invalid).
+    function test_expirySwap_isRejected() public {
+        address[] memory targets = new address[](1);
+        uint256[] memory values = new uint256[](1);
+        string[] memory sigs = new string[](1);
+        bytes[] memory cd = new bytes[](1);
+        targets[0] = makeAddr("recip");
+        values[0] = 1 ether;
+
+        uint256 signedExpiry = block.timestamp + 1 hours;
+        bytes memory aliceSig =
+            _signProposal(sigAlicePk, address(this), targets, values, sigs, cd, "swap", signedExpiry);
+        bytes memory bobSig =
+            _signProposal(sigBobPk, address(this), targets, values, sigs, cd, "swap", signedExpiry);
+
+        // Attacker submits with a LATER expiry than was signed.
+        uint256 swappedExpiry = block.timestamp + 100 days;
+        ShwounsDAOTypes.ProposerSignature[] memory proposerSigs = new ShwounsDAOTypes.ProposerSignature[](2);
+        proposerSigs[0] = ShwounsDAOTypes.ProposerSignature({ sig: aliceSig, signer: sigAlice, expirationTimestamp: swappedExpiry });
+        proposerSigs[1] = ShwounsDAOTypes.ProposerSignature({ sig: bobSig, signer: sigBob, expirationTimestamp: swappedExpiry });
+
+        vm.expectRevert(ShwounsDAOProposals.SigInvalid.selector);
+        dao.proposeBySigs(proposerSigs, targets, values, sigs, cd, "swap");
+    }
+
+    /// 0.5: any co-signer (not just the proposer) can cancel the proposal.
+    function test_anySigner_canCancel() public {
+        address[] memory targets = new address[](1);
+        uint256[] memory values = new uint256[](1);
+        string[] memory sigs = new string[](1);
+        bytes[] memory cd = new bytes[](1);
+        targets[0] = makeAddr("recip");
+        values[0] = 1 ether;
+
+        uint256 expiry = block.timestamp + 1 days;
+        bytes memory aliceSig = _signProposal(sigAlicePk, address(this), targets, values, sigs, cd, "cosign", expiry);
+        bytes memory bobSig = _signProposal(sigBobPk, address(this), targets, values, sigs, cd, "cosign", expiry);
+
+        ShwounsDAOTypes.ProposerSignature[] memory proposerSigs = new ShwounsDAOTypes.ProposerSignature[](2);
+        proposerSigs[0] = ShwounsDAOTypes.ProposerSignature({ sig: aliceSig, signer: sigAlice, expirationTimestamp: expiry });
+        proposerSigs[1] = ShwounsDAOTypes.ProposerSignature({ sig: bobSig, signer: sigBob, expirationTimestamp: expiry });
+
+        uint256 pid = dao.proposeBySigs(proposerSigs, targets, values, sigs, cd, "cosign");
+
+        // sigBob is a signer but NOT the proposer (proposer = this test contract).
+        vm.prank(sigBob);
+        dao.cancel(pid);
+        assertEq(uint256(dao.state(pid)), uint256(ShwounsDAOTypes.ProposalState.Canceled), "any signer can cancel");
+    }
+
+    /// 0.1: an ERC-1271 smart-contract wallet can co-sign (verified via SignatureChecker).
+    function test_erc1271_contractWalletCanCoSign() public {
+        MockERC1271Wallet wallet = new MockERC1271Wallet(sigCarol); // validates sigCarol's key
+        uint256 w1 = token.mint(); token.transferFrom(address(this), address(wallet), w1);
+        uint256 w2 = token.mint(); token.transferFrom(address(this), address(wallet), w2);
+        vm.prank(address(wallet)); token.delegate(address(wallet));
+        vm.roll(block.number + 1);
+
+        address[] memory targets = new address[](1);
+        uint256[] memory values = new uint256[](1);
+        string[] memory sigs = new string[](1);
+        bytes[] memory cd = new bytes[](1);
+        targets[0] = makeAddr("recip");
+        values[0] = 1 ether;
+
+        uint256 expiry = block.timestamp + 1 days;
+        bytes memory walletSig =
+            _signProposal(sigCarolPk, address(this), targets, values, sigs, cd, "erc1271", expiry);
+
+        ShwounsDAOTypes.ProposerSignature[] memory proposerSigs = new ShwounsDAOTypes.ProposerSignature[](1);
+        proposerSigs[0] = ShwounsDAOTypes.ProposerSignature({ sig: walletSig, signer: address(wallet), expirationTimestamp: expiry });
+
+        uint256 pid = dao.proposeBySigs(proposerSigs, targets, values, sigs, cd, "erc1271");
+        assertGt(pid, 0, "contract wallet co-signed");
+        assertEq(dao.proposalSigners(pid)[0], address(wallet), "wallet recorded as signer");
+    }
+}
+
+/// @dev Minimal ERC-1271 wallet: validates a signature if its owner's key produced it.
+contract MockERC1271Wallet {
+    address public owner;
+    constructor(address _owner) { owner = _owner; }
+    function isValidSignature(bytes32 hash, bytes calldata signature) external view returns (bytes4) {
+        return ECDSA.recover(hash, signature) == owner ? bytes4(0x1626ba7e) : bytes4(0xffffffff);
     }
 }
 
@@ -626,7 +840,7 @@ contract DAOSignedProposalsTest is Test {
 
 contract DAOSnapshotPagingTest is DAOTestBase {
     function setUp() public {
-        _deploy(1, 5, 1000);
+        _deploy(1, 7200);
     }
 
     function test_recordSnapshot_inMultipleBatches() public {
@@ -638,7 +852,7 @@ contract DAOSnapshotPagingTest is DAOTestBase {
         vm.prank(alice); dao.castVote(pid, 1);
         vm.prank(bob); dao.castVote(pid, 1);
         vm.prank(carol); dao.castVote(pid, 1);
-        vm.roll(block.number + 6);
+        vm.roll(block.number + 7201);
         dao.queue(pid);
 
         // Snapshot batchSize=1: should take 3 calls to complete

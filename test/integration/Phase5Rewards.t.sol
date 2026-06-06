@@ -76,9 +76,14 @@ contract Phase5RewardsTest is Test {
         // Phase 4 DAO
         ShwounsDAOLogic daoImpl = new ShwounsDAOLogic();
         ShwounsDAOTypes.ShwounsDAOParams memory params = ShwounsDAOTypes.ShwounsDAOParams({
-            votingPeriod: 5,
+            votingPeriod: 7200,
             votingDelay: 1,
-            proposalThresholdBPS: 0
+            proposalThresholdBPS: 1,
+            proposalUpdatablePeriodInBlocks: 0,
+            proposalQueuePeriodInBlocks: 50400
+        });
+        ShwounsDAOTypes.DynamicQuorumParams memory dq = ShwounsDAOTypes.DynamicQuorumParams({
+            minQuorumVotesBPS: 200, maxQuorumVotesBPS: 6000, quorumCoefficient: 0
         });
         bytes memory initData = abi.encodeWithSelector(
             ShwounsDAOLogic.initialize.selector,
@@ -87,7 +92,7 @@ contract Phase5RewardsTest is Test {
             IShwounsTokenLike(address(token)),
             registry,
             params,
-            1000
+            dq
         );
         ERC1967Proxy daoProxy = new ERC1967Proxy(address(daoImpl), initData);
         dao = ShwounsDAOLogic(payable(address(daoProxy)));
@@ -181,7 +186,7 @@ contract Phase5RewardsTest is Test {
         vm.prank(bob); dao.castVote(proposalId, 1);
         vm.prank(carol); dao.castVote(proposalId, 1);
         vm.prank(dave); dao.castVote(proposalId, 0);
-        vm.roll(block.number + 6);
+        vm.roll(block.number + 7201);
 
         dao.queue(proposalId);
         dao.recordSnapshot(proposalId, 10);
@@ -191,7 +196,7 @@ contract Phase5RewardsTest is Test {
         vaultIds[1] = bobNoun;
         vaultIds[2] = carolNoun;
         vaultIds[3] = daveNoun;
-        dao.collect(proposalId, vaultIds);
+        dao.collect(proposalId, vaultIds.length);
     }
 
     // =========================================================================
@@ -315,14 +320,14 @@ contract Phase5RewardsTest is Test {
         vm.prank(alice); dao.castVote(pid, 2); // abstain
         vm.prank(bob); dao.castVote(pid, 1);
         vm.prank(carol); dao.castVote(pid, 1);
-        vm.roll(block.number + 6);
+        vm.roll(block.number + 7201);
 
         dao.queue(pid);
         dao.recordSnapshot(pid, 10);
         uint256[] memory vaultIds = new uint256[](4);
         vaultIds[0] = aliceNoun; vaultIds[1] = bobNoun;
         vaultIds[2] = carolNoun; vaultIds[3] = daveNoun;
-        dao.collect(pid, vaultIds);
+        dao.collect(pid, vaultIds.length);
         dao.finalize(pid);
 
         vm.prank(alice);
