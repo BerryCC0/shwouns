@@ -27,6 +27,9 @@ library ShwounsDAOProposals {
     /// @dev The 4-byte selector for ERC-20 transfer(address,uint256). Used to detect
     ///      ERC-20 funding requirements in a proposal's calldata.
     bytes4 internal constant ERC20_TRANSFER_SELECTOR = bytes4(keccak256("transfer(address,uint256)"));
+    /// @dev UUPS upgrade selectors. A DAOLogic self-upgrade must be a proposal's FINAL action (A9).
+    bytes4 internal constant UPGRADE_TO_SELECTOR = bytes4(keccak256("upgradeTo(address)"));
+    bytes4 internal constant UPGRADE_TO_AND_CALL_SELECTOR = bytes4(keccak256("upgradeToAndCall(address,bytes)"));
 
     // -------------------------------------------------------------------------
     // Errors
@@ -62,6 +65,7 @@ library ShwounsDAOProposals {
     error EscrowImplNotSet();
     error NotTerminal();
     error EscrowCodehashMismatch();
+    error UpgradeMustBeLastAction();
 
     /// @notice Residual asset kinds for rescueFromEscrow (A8).
     enum AssetKind { ETH, ERC20, ERC721, ERC1155 }
@@ -463,6 +467,10 @@ library ShwounsDAOProposals {
         // Extract assets + per-asset requested amounts from the proposal's actions.
         _extractAssetsAndAmounts(ds, proposalId, p.targets, p.values, p.signatures, p.calldatas);
 
+        // A9: a DAOLogic self-upgrade must be the proposal's FINAL action, so no later action runs
+        // under a possibly-incompatible new implementation within the same finalize frame.
+        _validateUpgradeActionsAreLast(p.targets, p.signatures, p.calldatas);
+
         // Deploy this proposal's escrow EAGERLY at queue (A1). Deterministic EIP-1167 clone,
         // CREATE2 salt = proposalId, deployer = this DAOLogic proxy (the library runs in the
         // facade's context). ALL of the proposal's actions execute from this unique single-use
@@ -542,6 +550,27 @@ library ShwounsDAOProposals {
                 ss.assets.push(asset);
             }
             ss.requestedAmount[asset] += amount;
+        }
+    }
+
+    /// @dev A9: if any action is a DAOLogic self-upgrade (upgradeTo / upgradeToAndCall targeting
+    ///      this proxy), it must be the LAST action. Recognizes both raw-calldata and signature
+    ///      forms via _fullCalldata — the same encoding queue-time extraction and execute() use.
+    function _validateUpgradeActionsAreLast(
+        address[] memory targets,
+        string[] memory signatures,
+        bytes[] memory calldatas
+    ) internal view {
+        uint256 n = targets.length;
+        for (uint256 i = 0; i < n; i++) {
+            if (targets[i] != address(this)) continue;
+            bytes memory cd = _fullCalldata(signatures[i], calldatas[i]);
+            if (cd.length < 4) continue;
+            bytes4 sel;
+            assembly { sel := mload(add(cd, 32)) }
+            if ((sel == UPGRADE_TO_SELECTOR || sel == UPGRADE_TO_AND_CALL_SELECTOR) && i != n - 1) {
+                revert UpgradeMustBeLastAction();
+            }
         }
     }
 

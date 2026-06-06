@@ -30,6 +30,11 @@ import { IChainalysisSanctionsList } from '../interfaces/IChainalysisSanctionsLi
 import { IShwounsVaultRegistry } from '../vault/IShwounsVaultRegistry.sol';
 import { IGovernanceAuthRegistry } from '../governance/GovernanceAuthRegistry.sol';
 
+/// @dev Candidate-implementation getter used by the A9 honest-upgrade safeguard.
+interface IAuthed {
+    function governanceAuth() external view returns (address);
+}
+
 contract ShwounsAuctionHouse is
     IShwounsAuctionHouse,
     PausableUpgradeable,
@@ -139,7 +144,18 @@ contract ShwounsAuctionHouse is
     // UUPS upgrade authorization
     // -------------------------------------------------------------------------
 
-    function _authorizeUpgrade(address) internal override onlyOwner {}
+    function _authorizeUpgrade(address newImplementation) internal view override {
+        // A9: auction-house upgrades flow ONLY through an authenticated active proposal escrow.
+        if (address(governanceAuth) == address(0) || !governanceAuth.isActiveExecutor(msg.sender)) {
+            revert("AuctionHouse: not active executor");
+        }
+        // Honest-upgrade safeguard (review §9): the candidate must report the canonical auth
+        // registry (a storage-layout diff can't see this immutable). A fully malicious impl can
+        // still fake the getter and is out of scope per the A9 trust boundary.
+        if (IAuthed(newImplementation).governanceAuth() != address(governanceAuth)) {
+            revert("AuctionHouse: candidate registry mismatch");
+        }
+    }
 
     // -------------------------------------------------------------------------
     // Auction lifecycle

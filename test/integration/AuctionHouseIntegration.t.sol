@@ -183,21 +183,19 @@ contract AuctionHouseIntegrationTest is Test {
     // UUPS upgrade
     // -------------------------------------------------------------------------
 
-    function test_uupsUpgrade_byOwner_works() public {
-        // Deploy a new impl with the same constructor args
+    /// A9: auction-house upgrades flow ONLY through an authenticated active proposal escrow — even
+    /// the owner can no longer upgrade directly. (This suite has no registry/DAO wired, so the
+    /// escrow path is unavailable and every direct upgrade reverts. The success path — an upgrade
+    /// driven by a governance proposal, plus the candidate-registry check — lives in Upgrades.t.sol.)
+    function test_uupsUpgrade_byOwner_reverts_escrowOnly() public {
         ShwounsAuctionHouse newImpl = new ShwounsAuctionHouse(
             IShwounsToken(address(token)),
             address(weth),
             AUCTION_DURATION,
             address(0)
         );
-
-        // Upgrade
+        vm.expectRevert("AuctionHouse: not active executor");
         auctionHouse.upgradeTo(address(newImpl));
-
-        // State should be preserved — auctionStorage.shwounId is still 1
-        ShwounsAuctionHouse.AuctionV2View memory a = auctionHouse.auction();
-        assertEq(a.shwounId, 1);
     }
 
     function test_uupsUpgrade_byNonOwner_reverts() public {
@@ -209,7 +207,7 @@ contract AuctionHouseIntegrationTest is Test {
         );
 
         vm.prank(bob);
-        vm.expectRevert("Ownable: caller is not the owner");
+        vm.expectRevert("AuctionHouse: not active executor");
         auctionHouse.upgradeTo(address(newImpl));
     }
 

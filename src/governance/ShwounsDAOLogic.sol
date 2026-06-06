@@ -120,8 +120,15 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
         ds.quorumVotesBPS = quorumParams.minQuorumVotesBPS;
     }
 
-    /// @notice UUPS upgrade authorization — admin only.
-    function _authorizeUpgrade(address) internal view override onlyAdmin {}
+    error NotActiveExecutor();
+
+    /// @notice UUPS upgrade authorization (A9). DAOLogic upgrades flow ONLY through an authenticated
+    ///         active proposal escrow — never a standing admin/EOA — so the "self-upgrade is the
+    ///         final action" (validated at queue) and "the old finalize frame clears authentication"
+    ///         invariants always hold. A direct, non-executor upgradeTo reverts.
+    function _authorizeUpgrade(address) internal view override {
+        if (!ds.isActiveExecutor(msg.sender)) revert NotActiveExecutor();
+    }
 
     // -------------------------------------------------------------------------
     // Propose
