@@ -521,10 +521,28 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
 
     // -- Admin transfer (two-step) --
 
+    error AdminMustBeDAOOrZero();
+
+    /// @notice A10.5: a pending admin may only be the DAO itself (address(this)) or address(0) —
+    ///         never an EOA. The bootstrap handoff uses setAdminToDAO (direct); this two-step path
+    ///         remains only for governance and is structurally barred from installing an EOA admin.
     function setPendingAdmin(address newPendingAdmin) external onlyAdmin {
+        if (newPendingAdmin != address(this) && newPendingAdmin != address(0)) revert AdminMustBeDAOOrZero();
         address oldPendingAdmin = ds.pendingAdmin;
         ds.pendingAdmin = newPendingAdmin;
         emit NewPendingAdmin(oldPendingAdmin, newPendingAdmin);
+    }
+
+    /// @notice One-shot direct admin handoff to the DAO itself (A10.4). The DAO proxy can't submit
+    ///         acceptAdmin autonomously, so the bootstrap coordinator (the current admin) calls this
+    ///         to set the admin to the DAO directly. Afterwards the admin is the DAO, so admin
+    ///         functions are reachable only through governance (an authenticated proposal escrow) —
+    ///         no permanent EOA.
+    function setAdminToDAO() external onlyAdmin {
+        address oldAdmin = ds.admin;
+        ds.admin = address(this);
+        ds.pendingAdmin = address(0);
+        emit NewAdmin(oldAdmin, address(this));
     }
 
     function acceptAdmin() external {

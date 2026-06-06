@@ -2,27 +2,24 @@
 pragma solidity ^0.8.19;
 
 import {Test} from "forge-std/Test.sol";
-import {Deploy} from "../../script/Deploy.s.sol";
+import {Bootstrap} from "../../src/governance/Bootstrap.sol";
 import {ERC6551Registry} from "../mocks/ERC6551Registry.sol";
 import {MockWETH} from "../mocks/MockWETH.sol";
 import {ShwounsArt} from "../../src/token/ShwounsArt.sol";
 import {ShwounsDescriptor} from "../../src/token/ShwounsDescriptor.sol";
-import {Inflator} from "../../src/token/Inflator.sol";
-import {SVGRenderer} from "../../src/token/SVGRenderer.sol";
 import {IShwounsArt} from "../../src/interfaces/IShwounsArt.sol";
 import {ISVGRenderer} from "../../src/interfaces/ISVGRenderer.sol";
 import {IShwounsDescriptorMinimal} from "../../src/interfaces/IShwounsDescriptorMinimal.sol";
 
-/// @notice Exercises the full art pipeline — deploys Inflator, SVGRenderer, ShwounsArt, and
-///         ShwounsDescriptor (no MockDescriptor), then verifies the Descriptor can populate
-///         the Art via its onlyOwner functions. Confirms the deploy-time setDescriptor handoff
-///         transfers control of Art from the Deploy contract to the Descriptor.
+/// @notice Exercises the full art stack deployed by Bootstrap (without finalize, so the registry is
+///         unbound and Bootstrap remains the descriptor owner — the natural pre-handoff state).
 contract ArtPipelineTest is Test {
     address constant CANONICAL_REGISTRY = 0x000000006551c19487814612e58FE06813775758;
 
-    Deploy deployer;
-    Deploy.Deployment d;
-    Deploy.Config cfg;
+    Bootstrap b;
+    ShwounsArt art;
+    ShwounsDescriptor descriptor;
+    address owner; // Bootstrap holds owner during the pre-handoff phase
 
     address operator = makeAddr("operator");
     address foundersDAO = makeAddr("foundersDAO");
@@ -30,10 +27,9 @@ contract ArtPipelineTest is Test {
     function setUp() public {
         ERC6551Registry tmp = new ERC6551Registry();
         vm.etch(CANONICAL_REGISTRY, address(tmp).code);
-
         MockWETH weth = new MockWETH();
 
-        cfg = Deploy.Config({
+        Bootstrap.Config memory cfg = Bootstrap.Config({
             foundersDAO: foundersDAO,
             weth: address(weth),
             auctionDuration: 86400,
@@ -51,67 +47,53 @@ contract ArtPipelineTest is Test {
             maxRefundPerVote: 0.003 ether,
             lastMinuteWindowBlocks: 1,
             objectionPeriodBlocks: 3,
-            // No pre-deployed art / renderer — Deploy script builds the full stack
             art: IShwounsArt(address(0)),
             renderer: ISVGRenderer(address(0)),
-            preDeployedDescriptor: IShwounsDescriptorMinimal(address(0)),
-            adminTarget: operator
+            preDeployedDescriptor: IShwounsDescriptorMinimal(address(0)) // build the full stack
         });
-
-        deployer = new Deploy();
-        d = deployer._deploy(cfg);
-        vm.prank(operator);
-        d.dao.acceptAdmin();
+        b = new Bootstrap();
+        b.deploy(cfg); // not finalized: registry unbound, Bootstrap owns the descriptor
+        art = b.art();
+        descriptor = b.descriptor();
+        owner = address(b);
     }
 
     function test_artStack_isDeployed() public {
-        // All three new contracts should be deployed
-        assertTrue(address(d.art).code.length > 0, "art deployed");
-        assertTrue(address(d.inflator).code.length > 0, "inflator deployed");
-        assertTrue(address(d.renderer).code.length > 0, "renderer deployed");
-        assertTrue(address(d.descriptor).code.length > 0, "descriptor deployed");
+        assertTrue(address(art).code.length > 0, "art deployed");
+        assertTrue(address(b.inflator()).code.length > 0, "inflator deployed");
+        assertTrue(address(b.renderer()).code.length > 0, "renderer deployed");
+        assertTrue(address(descriptor).code.length > 0, "descriptor deployed");
     }
 
     function test_artStack_isWiredToDescriptor() public {
-        // Descriptor was constructed with art + renderer
-        assertEq(address(d.descriptor.art()), address(d.art));
-        assertEq(address(d.descriptor.renderer()), address(d.renderer));
-
-        // Art's descriptor handoff completed — Art's descriptor is now d.descriptor (not Deploy)
-        assertEq(d.art.descriptor(), address(d.descriptor));
-
-        // Art's inflator is wired
-        assertEq(address(d.art.inflator()), address(d.inflator));
+        assertEq(address(descriptor.art()), address(art));
+        assertEq(address(descriptor.renderer()), address(b.renderer()));
+        assertEq(art.descriptor(), address(descriptor)); // Art's descriptor handoff completed
+        assertEq(address(art.inflator()), address(b.inflator()));
     }
 
     function test_descriptor_canPopulateBackgrounds() public {
-        // Descriptor is owned by Deploy contract initially (matches other tests).
-        // After we add a background via the Descriptor's owner-only function, the count goes up.
-        vm.prank(address(deployer));
-        d.descriptor.addBackground("ffffff");
+        vm.prank(owner);
+        descriptor.addBackground("ffffff");
+        assertEq(art.backgroundCount(), 1);
+        assertEq(art.backgrounds(0), "ffffff");
 
-        assertEq(d.art.backgroundCount(), 1);
-        assertEq(d.art.backgrounds(0), "ffffff");
-
-        // Add a batch
         string[] memory more = new string[](3);
         more[0] = "000000";
         more[1] = "112233";
         more[2] = "445566";
-        vm.prank(address(deployer));
-        d.descriptor.addManyBackgrounds(more);
-
-        assertEq(d.art.backgroundCount(), 4);
-        assertEq(d.art.backgrounds(3), "445566");
+        vm.prank(owner);
+        descriptor.addManyBackgrounds(more);
+        assertEq(art.backgroundCount(), 4);
+        assertEq(art.backgrounds(3), "445566");
     }
 
     function test_descriptor_canSetPalette() public {
-        // 3-color palette (9 bytes — 3 RGB triples)
         bytes memory palette = hex"ff0000" hex"00ff00" hex"0000ff";
-        vm.prank(address(deployer));
-        d.descriptor.setPalette(0, palette);
+        vm.prank(owner);
+        descriptor.setPalette(0, palette);
 
-        bytes memory stored = d.art.palettes(0);
+        bytes memory stored = art.palettes(0);
         assertEq(stored.length, 9);
         assertEq(uint8(stored[0]), 0xff);
         assertEq(uint8(stored[4]), 0xff);
@@ -119,21 +101,19 @@ contract ArtPipelineTest is Test {
     }
 
     function test_directArtCall_blockedForNonDescriptor() public {
-        // Only the descriptor can call onlyDescriptor functions on Art directly
         vm.prank(operator);
         vm.expectRevert(IShwounsArt.SenderIsNotDescriptor.selector);
-        d.art.addBackground("ffffff");
+        art.addBackground("ffffff");
     }
 
     function test_descriptor_lockingPartsDisablesUpdates() public {
-        vm.prank(address(deployer));
-        d.descriptor.addBackground("ffffff");
-        vm.prank(address(deployer));
-        d.descriptor.lockParts();
+        vm.prank(owner);
+        descriptor.addBackground("ffffff");
+        vm.prank(owner);
+        descriptor.lockParts();
 
-        // Now further additions should revert (descriptor's whenPartsNotLocked check)
-        vm.prank(address(deployer));
+        vm.prank(owner);
         vm.expectRevert("Parts are locked");
-        d.descriptor.addBackground("000000");
+        descriptor.addBackground("000000");
     }
 }

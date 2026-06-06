@@ -98,6 +98,18 @@ contract ShwounsAuctionHouse is
         revert("Ownable: caller is not the owner");
     }
 
+    /// @notice A10.5: once the auth registry is bound (post-bootstrap), ownership may only move to
+    ///         the canonical DAO or address(0) — never an EOA. Pre-binding (bootstrap) is standard.
+    function transferOwnership(address newOwner) public virtual override onlyOwner {
+        if (address(governanceAuth) != address(0)) {
+            address dao = governanceAuth.daoLogic();
+            if (dao != address(0) && newOwner != dao && newOwner != address(0)) {
+                revert("AuctionHouse: owner must be DAO or zero");
+            }
+        }
+        _transferOwnership(newOwner);
+    }
+
     /// @notice Initialize the auction house. Sets initial knobs and pauses for setup.
     function initialize(
         uint192 _reservePrice,

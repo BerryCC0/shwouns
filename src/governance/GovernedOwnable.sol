@@ -25,11 +25,28 @@ abstract contract GovernedOwnable is Ownable {
         governanceAuth = IGovernanceAuthRegistry(_governanceAuth);
     }
 
+    error OwnerMustBeDAOOrZero();
+
     /// @dev Accept the structural owner OR the active proposal escrow. Mirrors OZ's revert message
     ///      so existing integrations/tests that match on it keep working.
     function _checkOwner() internal view virtual override {
         if (msg.sender == owner()) return;
         if (address(governanceAuth) != address(0) && governanceAuth.isActiveExecutor(msg.sender)) return;
         revert("Ownable: caller is not the owner");
+    }
+
+    /// @notice A10.5: once the auth registry is bound (post-bootstrap), ownership may only move to
+    ///         the canonical DAO or to address(0) — never to an EOA. Before binding (the bootstrap
+    ///         window, when only the trusted Bootstrap coordinator owns these contracts) this is
+    ///         standard Ownable, so Bootstrap can wire and hand off. renounceOwnership (→ zero) is
+    ///         always permitted.
+    function transferOwnership(address newOwner) public virtual override onlyOwner {
+        if (address(governanceAuth) != address(0)) {
+            address dao = governanceAuth.daoLogic();
+            if (dao != address(0) && newOwner != dao && newOwner != address(0)) {
+                revert OwnerMustBeDAOOrZero();
+            }
+        }
+        _transferOwnership(newOwner);
     }
 }

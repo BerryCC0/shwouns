@@ -2,54 +2,48 @@
 pragma solidity ^0.8.19;
 
 import {Test} from "forge-std/Test.sol";
-import {Deploy} from "../../script/Deploy.s.sol";
+import {Bootstrap} from "../../src/governance/Bootstrap.sol";
 import {ERC6551Registry} from "../mocks/ERC6551Registry.sol";
 import {MockDescriptor} from "../mocks/MockDescriptor.sol";
 import {MockWETH} from "../mocks/MockWETH.sol";
+import {ShwounsToken} from "../../src/token/ShwounsToken.sol";
+import {ShwounsDAOLogic} from "../../src/governance/ShwounsDAOLogic.sol";
 import {ShwounsDAOTypes} from "../../src/governance/ShwounsDAOInterfaces.sol";
-import {ShwounsVault} from "../../src/vault/ShwounsVault.sol";
 import {ShwounsAuctionHouse} from "../../src/auction/ShwounsAuctionHouse.sol";
+import {ShwounsVault} from "../../src/vault/ShwounsVault.sol";
 import {IShwounsArt} from "../../src/interfaces/IShwounsArt.sol";
 import {ISVGRenderer} from "../../src/interfaces/ISVGRenderer.sol";
 import {IShwounsDescriptorMinimal} from "../../src/interfaces/IShwounsDescriptorMinimal.sol";
 
-/// @notice Exercises the full Deploy.s.sol script against a local anvil-like environment.
-///         Verifies all 13 contracts are deployed, wiring is correct, ownership is in the
-///         intended state, and a full propose→vote→queue→snapshot→collect→finalize flow
-///         works against the deployed system.
+/// @notice Exercises the persistent Bootstrap deployment coordinator (H-02) and its one-shot
+///         finalizeBootstrap handoff (A10), plus the no-permanent-EOA structural enforcement (A10.5).
 contract DeploymentTest is Test {
     address constant CANONICAL_REGISTRY = 0x000000006551c19487814612e58FE06813775758;
 
-    Deploy deployer;
-    Deploy.Deployment d;
-    Deploy.Config cfg;
-
-    address operator = makeAddr("operator"); // the deployer EOA
+    Bootstrap b;
+    Bootstrap.Config cfg;
     address foundersDAO = makeAddr("foundersDAO");
 
     function setUp() public {
-        // Etch canonical ERC-6551 registry
         ERC6551Registry tmp = new ERC6551Registry();
         vm.etch(CANONICAL_REGISTRY, address(tmp).code);
 
-        // Deploy a WETH mock and a Descriptor-compatible mock (real Descriptor needs
-        // Art+Renderer; we use MockDescriptor here so the test doesn't need to deploy art).
         MockWETH weth = new MockWETH();
         MockDescriptor mockDesc = new MockDescriptor();
 
-        cfg = Deploy.Config({
+        cfg = Bootstrap.Config({
             foundersDAO: foundersDAO,
             weth: address(weth),
             auctionDuration: 86400,
             reservePrice: 0.01 ether,
             timeBuffer: 300,
             minBidIncrementPct: 2,
-            votingDelay: 1,         // 1 block for fast test cycles
-            votingPeriod: 7200,     // min allowed voting period
+            votingDelay: 1,
+            votingPeriod: 7200,
             proposalThresholdBPS: 1,
             proposalUpdatablePeriodInBlocks: 0,
             proposalQueuePeriodInBlocks: 50400,
-            quorumVotesBPS: 1000,   // 10%
+            quorumVotesBPS: 1000,
             giMintPrice: 0.01 ether,
             proposalReward: 0.1 ether,
             maxRefundPerVote: 0.003 ether,
@@ -57,174 +51,149 @@ contract DeploymentTest is Test {
             objectionPeriodBlocks: 3,
             art: IShwounsArt(address(0)),
             renderer: ISVGRenderer(address(0)),
-            preDeployedDescriptor: IShwounsDescriptorMinimal(address(mockDesc)),
-            adminTarget: operator
+            preDeployedDescriptor: IShwounsDescriptorMinimal(address(mockDesc))
         });
 
-        deployer = new Deploy();
-
-        // _deploy uses Deploy contract as temporary admin; cfg.adminTarget is set as
-        // pending admin. operator must call acceptAdmin to finalize.
-        d = deployer._deploy(cfg);
-        vm.prank(operator);
-        d.dao.acceptAdmin();
-        // Note: Ownable contracts (token, descriptor, auctionHouse, rewards, approvalRegistry)
-        // are still owned by the Deploy contract at this point. Tests that need ownership
-        // either call transferOwnershipToDAO via the Deploy contract OR vm.prank as Deploy.
+        b = new Bootstrap();
+        b.deploy(cfg);
     }
 
-    // -------------------------------------------------------------------------
-    // Verify all contracts exist
-    // -------------------------------------------------------------------------
+    // ---- deployment + wiring (pre-finalize) ----
 
     function test_allContracts_deployed() public {
-        assertTrue(address(d.token).code.length > 0, "token");
-        assertTrue(address(d.seeder).code.length > 0, "seeder");
-        // d.descriptor is address(0) when preDeployedDescriptor was used (test setup).
-        // Verify the token was wired to SOMETHING (descriptor or pre-deployed mock).
-        assertTrue(address(d.token.descriptor()).code.length > 0, "descriptor (or mock)");
-        assertTrue(address(d.vaultRegistry).code.length > 0, "vault registry");
-        assertTrue(address(d.vaultImpl).code.length > 0, "vault impl");
-        assertTrue(address(d.auctionHouse).code.length > 0, "auction house proxy");
-        assertTrue(address(d.auctionHouseImpl).code.length > 0, "auction house impl");
-        assertTrue(address(d.dao).code.length > 0, "dao proxy");
-        assertTrue(address(d.daoImpl).code.length > 0, "dao impl");
-        assertTrue(address(d.rewards).code.length > 0, "rewards");
-        assertTrue(address(d.giNFT).code.length > 0, "gi nft");
-        assertTrue(address(d.approvalRegistry).code.length > 0, "approval registry");
-        assertTrue(address(d.daoData).code.length > 0, "dao data");
+        assertTrue(address(b.token()).code.length > 0, "token");
+        assertTrue(address(b.authRegistry()).code.length > 0, "auth registry");
+        assertTrue(address(b.vaultRegistry()).code.length > 0, "vault registry");
+        assertTrue(address(b.vaultImpl()).code.length > 0, "vault impl");
+        assertTrue(address(b.auctionHouse()).code.length > 0, "auction house proxy");
+        assertTrue(address(b.dao()).code.length > 0, "dao proxy");
+        assertTrue(address(b.proposalEscrowImpl()).code.length > 0, "escrow impl");
+        assertTrue(address(b.rewards()).code.length > 0, "rewards");
+        assertTrue(address(b.giNFT()).code.length > 0, "gi nft");
+        assertTrue(address(b.approvalRegistry()).code.length > 0, "approval registry");
+        assertTrue(address(b.daoData()).code.length > 0, "dao data");
     }
 
-    // -------------------------------------------------------------------------
-    // Verify wiring
-    // -------------------------------------------------------------------------
-
-    function test_wiring_tokenMinter_isAuctionHouse() public {
-        assertEq(d.token.minter(), address(d.auctionHouse));
+    function test_wiring() public {
+        assertEq(b.token().minter(), address(b.auctionHouse()), "token minter");
+        assertEq(b.vaultRegistry().vaultImplementation(), address(b.vaultImpl()));
+        assertTrue(b.vaultRegistry().vaultImplementationLocked());
+        assertEq(b.vaultRegistry().daoLogic(), address(b.dao()));
+        assertEq(b.auctionHouse().governanceRewards(), address(b.rewards()));
+        assertEq(address(b.auctionHouse().vaultRegistry()), address(b.vaultRegistry()));
+        assertEq(address(b.dao().governanceRewards()), address(b.rewards()));
+        assertEq(address(b.rewards().dao()), address(b.dao()));
+        assertEq(address(b.rewards().approvalRegistry()), address(b.approvalRegistry()));
+        assertEq(address(b.approvalRegistry().giNFT()), address(b.giNFT()));
+        assertEq(b.dao().proposalEscrowImplementation(), address(b.proposalEscrowImpl()));
+        // A6: GI proceeds -> GR, ownership independent.
+        assertEq(b.giNFT().proceedsRecipient(), address(b.rewards()));
     }
 
-    function test_wiring_vaultRegistry_referencesToken() public {
-        assertEq(d.vaultRegistry.shwounsToken(), address(d.token));
+    function test_params() public {
+        assertEq(b.dao().votingDelay(), cfg.votingDelay);
+        assertEq(b.dao().votingPeriod(), cfg.votingPeriod);
+        assertEq(b.rewards().proposalRewardAmount(), cfg.proposalReward);
+        assertEq(b.giNFT().mintPrice(), cfg.giMintPrice);
     }
 
-    function test_wiring_vaultRegistry_hasVaultImpl_locked() public {
-        assertEq(d.vaultRegistry.vaultImplementation(), address(d.vaultImpl));
-        assertTrue(d.vaultRegistry.vaultImplementationLocked());
+    /// Before handoff: Bootstrap owns everything, the registry is unbound, the auction is paused.
+    function test_preFinalize_bootstrapHoldsRoles_auctionPaused_registryUnbound() public {
+        assertEq(b.token().owner(), address(b), "token owned by Bootstrap");
+        assertEq(b.rewards().owner(), address(b), "rewards owned by Bootstrap");
+        assertEq(b.dao().admin(), address(b), "DAO admin is Bootstrap");
+        assertEq(b.authRegistry().daoLogic(), address(0), "registry unbound");
+        assertTrue(b.auctionHouse().paused(), "auction paused during bootstrap");
+        assertFalse(b.finalized());
     }
 
-    function test_wiring_vaultRegistry_daoLogic_locked() public {
-        assertEq(d.vaultRegistry.daoLogic(), address(d.dao));
-        assertTrue(d.vaultRegistry.daoLogicLocked());
+    // ---- finalizeBootstrap handoff (A10) ----
+
+    function test_finalizeBootstrap_handsOffToGovernance_andRevokesBootstrap() public {
+        b.finalizeBootstrap();
+        address dao = address(b.dao());
+
+        // All ownership -> DAO.
+        assertEq(b.token().owner(), dao, "token -> DAO");
+        assertEq(b.rewards().owner(), dao, "rewards -> DAO");
+        assertEq(b.approvalRegistry().owner(), dao, "approvalRegistry -> DAO");
+        assertEq(b.giNFT().owner(), dao, "giNFT -> DAO");
+        assertEq(b.auctionHouse().owner(), dao, "auctionHouse -> DAO");
+        assertEq(b.vaultRegistry().owner(), dao, "vaultRegistry -> DAO");
+
+        // DAO admin -> DAO itself; registry bound to DAO.
+        assertEq(b.dao().admin(), dao, "admin -> DAO");
+        assertEq(b.authRegistry().daoLogic(), dao, "registry bound to DAO");
+
+        // First auction kicked off (deadlock-free genesis), Bootstrap revoked.
+        assertFalse(b.auctionHouse().paused(), "auction running after handoff");
+        assertTrue(b.finalized());
+
+        // Second finalize reverts.
+        vm.expectRevert(Bootstrap.AlreadyFinalized.selector);
+        b.finalizeBootstrap();
     }
 
-    function test_wiring_auctionHouse_governanceRewards_andRegistry() public {
-        assertEq(d.auctionHouse.governanceRewards(), address(d.rewards));
-        assertTrue(d.auctionHouse.governanceRewardsLocked());
-        assertEq(address(d.auctionHouse.vaultRegistry()), address(d.vaultRegistry));
-        assertTrue(d.auctionHouse.vaultRegistryLocked());
+    // ---- A10.5 no-permanent-EOA structural enforcement (post-handoff) ----
+
+    function test_a105_ownershipCannotMoveToEOA_afterHandoff() public {
+        b.finalizeBootstrap();
+        ShwounsToken tok = b.token(); // cache before pranking (getter would consume the prank)
+        address dao = address(b.dao());
+        address eoa = makeAddr("eoa");
+
+        // Acting AS the DAO (the owner), ownership still cannot move to an EOA.
+        vm.prank(dao);
+        vm.expectRevert(); // OwnerMustBeDAOOrZero
+        tok.transferOwnership(eoa);
+
+        // DAO-or-zero destinations are allowed.
+        vm.prank(dao);
+        tok.transferOwnership(dao); // no-op self-transfer, permitted
+        assertEq(tok.owner(), dao);
     }
 
-    function test_wiring_dao_governanceRewards_locked() public {
-        assertEq(address(d.dao.governanceRewards()), address(d.rewards));
-        assertTrue(d.dao.governanceRewardsLocked());
+    function test_a105_pendingAdminCannotBeEOA() public {
+        b.finalizeBootstrap();
+        ShwounsDAOLogic d = b.dao(); // cache before pranking
+        address dao = address(d);
+        address eoa = makeAddr("eoa");
+
+        vm.prank(dao);
+        vm.expectRevert(); // AdminMustBeDAOOrZero
+        d.setPendingAdmin(eoa);
+
+        // DAO/zero are permitted.
+        vm.prank(dao);
+        d.setPendingAdmin(address(0));
     }
 
-    function test_wiring_rewards_daoLogic_locked() public {
-        assertEq(address(d.rewards.dao()), address(d.dao));
-        assertTrue(d.rewards.daoLocked());
-    }
+    // ---- end-to-end: the whole handed-off system works (auction -> vault -> proposal -> escrow) ----
 
-    function test_wiring_rewards_approvalRegistry_locked() public {
-        assertEq(address(d.rewards.approvalRegistry()), address(d.approvalRegistry));
-        assertTrue(d.rewards.approvalRegistryLocked());
-    }
+    function test_endToEnd_auctionThenGovernanceExecutesViaEscrow() public {
+        b.finalizeBootstrap(); // auction #1 now running, all roles with the DAO
+        ShwounsToken token = b.token();
+        ShwounsAuctionHouse ah = b.auctionHouse();
+        ShwounsDAOLogic dao = b.dao();
 
-    function test_wiring_approvalRegistry_referencesGiNFT() public {
-        assertEq(address(d.approvalRegistry.giNFT()), address(d.giNFT));
-    }
-
-    /// A6: GI NFT proceeds are decoupled from ownership. `proceedsRecipient` (where mint proceeds
-    /// flow) is GovernanceRewards, while OWNERSHIP goes to governance (the Deploy contract holds it
-    /// transiently here; transferOwnershipToDAO hands it to the DAO).
-    function test_wiring_giNFT_proceedsRecipientIsRewards() public {
-        assertEq(d.giNFT.proceedsRecipient(), address(d.rewards), "proceeds -> GR");
-        assertEq(d.giNFT.owner(), address(deployer), "owned by Deploy until handoff");
-    }
-
-    // -------------------------------------------------------------------------
-    // Verify parameters set correctly
-    // -------------------------------------------------------------------------
-
-    function test_params_dao() public {
-        assertEq(d.dao.votingDelay(), cfg.votingDelay);
-        assertEq(d.dao.votingPeriod(), cfg.votingPeriod);
-        assertEq(d.dao.quorumVotesBPS(), cfg.quorumVotesBPS);
-        assertEq(d.dao.lastMinuteWindowInBlocks(), cfg.lastMinuteWindowBlocks);
-        assertEq(d.dao.objectionPeriodDurationInBlocks(), cfg.objectionPeriodBlocks);
-    }
-
-    function test_params_rewards() public {
-        assertEq(d.rewards.proposalRewardAmount(), cfg.proposalReward);
-        assertEq(d.rewards.maxRefundPerVote(), cfg.maxRefundPerVote);
-    }
-
-    function test_params_giNFT() public {
-        assertEq(d.giNFT.mintPrice(), cfg.giMintPrice);
-    }
-
-    // -------------------------------------------------------------------------
-    // Ownership transfers
-    // -------------------------------------------------------------------------
-
-    function test_ownership_transferOwnershipToDAO_movesAllOwnership() public {
-        // Before transfer, owner is the Deploy contract (which created all the Ownables)
-        assertEq(d.token.owner(), address(deployer));
-        assertEq(d.rewards.owner(), address(deployer));
-        assertEq(d.giNFT.owner(), address(deployer)); // A6: GI NFT owned by deployer pre-handoff
-
-        deployer.transferOwnershipToDAO(d);
-
-        // After transfer, ownership is the DAO
-        assertEq(d.token.owner(), address(d.dao));
-        assertEq(d.rewards.owner(), address(d.dao));
-        assertEq(d.approvalRegistry.owner(), address(d.dao));
-        assertEq(d.auctionHouse.owner(), address(d.dao));
-        assertEq(d.giNFT.owner(), address(d.dao)); // A6: GI NFT ownership now governance
-        // proceeds still route to GR regardless of ownership
-        assertEq(d.giNFT.proceedsRecipient(), address(d.rewards));
-        // d.descriptor is address(0) in this test (we used preDeployedDescriptor for art);
-        // transferOwnershipToDAO skips it in that case. Skip the assertion too.
-    }
-
-    // -------------------------------------------------------------------------
-    // Smoke test: full end-to-end flow
-    // -------------------------------------------------------------------------
-
-    function test_endToEnd_auctionAndProposal() public {
-        // Kick off the auction. AuctionHouse is owned by Deploy contract at this point.
-        deployer.startFirstAuction(d);
-
-        ShwounsAuctionHouse.AuctionV2View memory a = d.auctionHouse.auction();
+        // Auction #1 is live; bid and settle so a bidder gets Shwoun #1 + GR earns the proceeds.
+        ShwounsAuctionHouse.AuctionV2View memory a = ah.auction();
         assertEq(a.shwounId, 1, "first auction Shwoun is 1");
-
-        // Bid and settle
         address bidder = makeAddr("bidder");
         vm.deal(bidder, 5 ether);
         vm.prank(bidder);
-        d.auctionHouse.createBid{value: 1 ether}(1);
+        ah.createBid{value: 1 ether}(1);
+        vm.warp(block.timestamp + cfg.auctionDuration + 1);
+        ah.settleCurrentAndCreateNewAuction();
+        assertEq(token.ownerOf(1), bidder, "Shwoun 1 -> bidder");
+        assertEq(address(b.rewards()).balance, 1 ether, "proceeds -> GovernanceRewards");
 
-        vm.warp(block.timestamp + 86401);
-        d.auctionHouse.settleCurrentAndCreateNewAuction();
-        assertEq(d.token.ownerOf(1), bidder, "Shwoun 1 to bidder");
-        assertEq(address(d.rewards).balance, 1 ether, "1 ETH to GovernanceRewards");
-
-        // Bidder funds their vault and votes on a proposal
-        ShwounsVault bidderVault = ShwounsVault(payable(d.vaultRegistry.vaultOf(1)));
+        // Bidder funds their vault, delegates, and runs a full governance proposal.
+        ShwounsVault bidderVault = ShwounsVault(payable(b.vaultRegistry().vaultOf(1)));
         vm.prank(bidder); bidderVault.deposit{value: 2 ether}();
-        vm.prank(bidder); d.token.delegate(bidder);
+        vm.prank(bidder); token.delegate(bidder);
         vm.roll(block.number + 1);
 
-        // Bidder proposes (proposalThresholdBPS = 0 so anyone can propose)
         address[] memory targets = new address[](1);
         uint256[] memory values = new uint256[](1);
         string[] memory sigs = new string[](1);
@@ -232,29 +201,22 @@ contract DeploymentTest is Test {
         targets[0] = makeAddr("propTarget");
         values[0] = 1 ether;
         vm.prank(bidder);
-        uint256 pid = d.dao.propose(targets, values, sigs, cd, "e2e smoke");
+        uint256 pid = dao.propose(targets, values, sigs, cd, "e2e");
 
         vm.roll(block.number + cfg.votingDelay + 1);
-        vm.prank(bidder); d.dao.castVote(pid, 1);
+        vm.prank(bidder); dao.castVote(pid, 1);
         vm.roll(block.number + cfg.votingPeriod + 1);
+        assertEq(uint256(dao.state(pid)), uint256(ShwounsDAOTypes.ProposalState.Succeeded));
 
-        assertEq(uint256(d.dao.state(pid)), uint256(ShwounsDAOTypes.ProposalState.Succeeded));
+        dao.queue(pid); // small active set -> frozen in queue
+        dao.recordSnapshot(pid, 10);
+        dao.collect(pid, 10);
 
-        d.dao.queue(pid);
-        d.dao.recordSnapshot(pid, 10);
-        uint256[] memory vaultIds = new uint256[](1);
-        vaultIds[0] = 1;
-        d.dao.collect(pid, vaultIds.length);
+        uint256 grBefore = address(b.rewards()).balance;
+        dao.finalize(pid); // executes from the proposal's escrow
 
-        uint256 grBefore = address(d.rewards).balance;
-        d.dao.finalize(pid);
-
-        // Target received the 1 ETH
-        assertEq(targets[0].balance, 1 ether);
-        // GR earmarked the reward pool (allocation is bookkeeping; ETH stays in GR
-        // until voters claim)
-        assertEq(d.rewards.proposalRewardPool(pid), cfg.proposalReward);
-        assertEq(address(d.rewards).balance, grBefore, "GR balance unchanged at allocation");
+        assertEq(targets[0].balance, 1 ether, "proposal executed via escrow");
+        assertEq(b.rewards().proposalRewardPool(pid), cfg.proposalReward, "voter reward pool reserved");
+        assertEq(address(b.rewards()).balance, grBefore, "GR balance unchanged at allocation");
     }
 }
-

@@ -160,17 +160,20 @@ contract DAOAdminTest is DAOTestBase {
         assertEq(dao.quorumVotesBPS(), 3000);
     }
 
-    function test_acceptAdmin_flow() public {
-        address newAdmin = makeAddr("newAdmin");
-        dao.setPendingAdmin(newAdmin);
-        // Random caller cannot accept
-        vm.prank(alice);
-        vm.expectRevert(ShwounsDAOLogic.OnlyAdmin.selector);
-        dao.acceptAdmin();
-        // Pending admin can accept
-        vm.prank(newAdmin);
-        dao.acceptAdmin();
-        assertEq(dao.admin(), newAdmin);
+    /// A10.5: the admin can never become a permanent EOA. setPendingAdmin is restricted to the DAO
+    /// itself or zero, and the direct handoff (setAdminToDAO) sets the admin to the DAO.
+    function test_admin_noPermanentEOA() public {
+        address eoa = makeAddr("newAdmin");
+        vm.expectRevert(ShwounsDAOLogic.AdminMustBeDAOOrZero.selector);
+        dao.setPendingAdmin(eoa);
+
+        // DAO-or-zero pending admins are permitted.
+        dao.setPendingAdmin(address(dao));
+        dao.setPendingAdmin(address(0));
+
+        // Direct handoff (the bootstrap path) sets the admin to the DAO itself.
+        dao.setAdminToDAO();
+        assertEq(dao.admin(), address(dao));
     }
 
     function test_vetoer_transfer() public {
