@@ -30,6 +30,7 @@ import { ApprovalRegistry } from "../src/rewards/ApprovalRegistry.sol";
 import { ShwounsDAOLogic } from "../src/governance/ShwounsDAOLogic.sol";
 import { ShwounsDAOTypes, IShwounsTokenLike } from "../src/governance/ShwounsDAOInterfaces.sol";
 import { ShwounsDAOData } from "../src/governance/data/ShwounsDAOData.sol";
+import { ProposalEscrow } from "../src/governance/ProposalEscrow.sol";
 
 /// @title Deploy — full Shwouns protocol deployment script
 ///
@@ -112,6 +113,7 @@ contract Deploy is Script {
         ShwounsAuctionHouse auctionHouseImpl;
         ShwounsDAOLogic dao;                       // proxy address
         ShwounsDAOLogic daoImpl;
+        ProposalEscrow proposalEscrowImpl;         // per-proposal escrow clone source
         GovernanceRewards rewards;
         GovernanceIncentivesNFT giNFT;
         ApprovalRegistry approvalRegistry;
@@ -283,6 +285,13 @@ contract Deploy is Script {
         d.vaultRegistry.setDAOLogic(address(d.dao)); // locks vault.pullProRata gate
         d.dao.setGovernanceRewards(address(d.rewards));
         d.rewards.setDAOLogic(address(d.dao)); // locks
+
+        // Per-proposal escrow implementation (the EIP-1167 clone source). Deployed AFTER DAOLogic so
+        // its immutable daoLogic = the DAO proxy address; residualSink = GovernanceRewards. Then
+        // registered + locked on the DAO (admin is this Deploy contract here). Phase 6 folds this
+        // into the Bootstrap coordinator.
+        d.proposalEscrowImpl = new ProposalEscrow(address(d.dao), address(d.rewards));
+        d.dao.setProposalEscrowImplementation(address(d.proposalEscrowImpl));
 
         // ─────── 8. Candidates (standalone, no wiring needed) ───────
         d.daoData = new ShwounsDAOData();

@@ -132,11 +132,27 @@ interface ShwounsDAOTypes {
         /// @notice How long after voting ends (in blocks) a Succeeded proposal may still be
         ///         queued before it becomes Expired. Shwouns policy (Nouns leaves it indefinite).
         uint256 proposalQueuePeriodInBlocks;
+        // -- Appended for the security-remediation execution model (append-only; do not reorder) --
+        /// @notice Global execution lock. True only while a finalize() is mid-flight (between the
+        ///         lock being set and escrow.execute returning). The single "effect" set before the
+        ///         external calls (CEI); terminal `executed` is set only AFTER execute returns.
+        bool executing;
+        /// @notice The proposal currently Executing under the lock (0 = none). Together with
+        ///         `executing` this is the entire transient state behind the `Executing` lifecycle
+        ///         status and the `isActiveExecutor` authentication predicate.
+        uint256 activeProposalId;
+        /// @notice The locked ProposalEscrow implementation (EIP-1167 clone source). Set once at
+        ///         bootstrap. The deterministic escrow address and EXPECTED_ESCROW_CODEHASH both
+        ///         derive from this single locked address.
+        address proposalEscrowImplementation;
+        /// @notice One-shot lock for `proposalEscrowImplementation`.
+        bool proposalEscrowImplementationLocked;
         /// @notice Reserved slots for future upgrades. This Storage struct sits at slot 0 of the
         ///         UUPS proxy, FOLLOWED by inherited OpenZeppelin storage — so new fields must be
         ///         appended HERE (consuming the gap), never after `ds`, or they would shift the
         ///         inherited slots. Decrement the gap size by the number of slots you add.
-        uint256[50] __gap;
+        ///         Was [50]; -3 for executing(1) + activeProposalId(1) + escrowImpl+lock packed(1).
+        uint256[47] __gap;
     }
 
     // --------------------------------------------------------------------------
@@ -287,7 +303,11 @@ interface ShwounsDAOTypes {
         Vetoed,          // 9  vetoed
         Expired,         // 10 succeeded but never queued before queueDeadlineBlock (wired in E)
         ObjectionPeriod, // 11 last-minute For-flip extended voting; only Against votes accepted
-        Updatable        // 12 pre-voting edit window (wired in E); appended — never renumber
+        Updatable,       // 12 pre-voting edit window (wired in E); appended — never renumber
+        Executing        // 13 finalize() in progress — transient; set before escrow.execute, cleared
+                         //    after it returns (terminal Executed is set only then). Appended —
+                         //    never renumber. A proposal is Executing iff it is the active proposal
+                         //    under the global execution lock (ds.executing && ds.activeProposalId).
     }
 }
 

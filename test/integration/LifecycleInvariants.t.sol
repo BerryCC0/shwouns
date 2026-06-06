@@ -11,6 +11,7 @@ import {ShwounsVaultRegistry} from "../../src/vault/ShwounsVaultRegistry.sol";
 import {ShwounsDAOLogic} from "../../src/governance/ShwounsDAOLogic.sol";
 import {ShwounsDAOProposals} from "../../src/governance/ShwounsDAOProposals.sol";
 import {ShwounsDAOTypes, IShwounsTokenLike} from "../../src/governance/ShwounsDAOInterfaces.sol";
+import {ProposalEscrow, IProposalEscrow} from "../../src/governance/ProposalEscrow.sol";
 
 import {ERC6551Registry} from "../mocks/ERC6551Registry.sol";
 import {MockDescriptor} from "../mocks/MockDescriptor.sol";
@@ -77,6 +78,11 @@ contract LifecycleInvariantsTest is Test {
         dao = ShwounsDAOLogic(payable(address(new ERC1967Proxy(address(daoImpl), initData))));
         registry.setDAOLogic(address(dao));
 
+        // Per-proposal escrow implementation (EIP-1167 clone source). daoLogic = the DAO proxy; the
+        // residual sink is a placeholder (rescue isn't exercised by these suites).
+        ProposalEscrow escrowImpl = new ProposalEscrow(address(dao), address(0xBEEF));
+        dao.setProposalEscrowImplementation(address(escrowImpl));
+
         aliceNoun = _mintTo(alice);
         bobNoun = _mintTo(bob);
         carolNoun = _mintTo(carol);
@@ -136,6 +142,12 @@ contract LifecycleInvariantsTest is Test {
 
     function _state(uint256 pid) internal view returns (ShwounsDAOTypes.ProposalState) {
         return dao.state(pid);
+    }
+
+    /// @dev Collected funds now live in the proposal's own escrow (per-proposal custody), not the
+    ///      shared facade. Assertions about "how much the proposal holds" read the escrow balance.
+    function _escrowBal(uint256 pid) internal view returns (uint256) {
+        return dao.escrowAddressOf(pid).balance;
     }
 
     // =========================================================================
@@ -215,10 +227,12 @@ contract LifecycleInvariantsTest is Test {
         assertEq(progress, 1);
         assertEq(uint256(_state(pid)), uint256(ShwounsDAOTypes.ProposalState.Snapshotted), "still Snapshotted");
 
-        // Finishing the remaining real vaults flips to Collected and the DAO holds the funds.
+        // Finishing the remaining real vaults flips to Collected and the proposal's escrow holds
+        // the funds (per-proposal custody, not the shared facade).
         dao.collect(pid, 10);
         assertEq(uint256(_state(pid)), uint256(ShwounsDAOTypes.ProposalState.Collected), "Collected");
-        assertEq(address(dao).balance, 6 ether, "collected exactly the requested amount");
+        assertEq(_escrowBal(pid), 6 ether, "escrow holds exactly the requested amount");
+        assertEq(address(dao).balance, 0, "facade never custodies collected funds");
     }
 
     // =========================================================================
@@ -275,29 +289,31 @@ contract LifecycleInvariantsTest is Test {
         dao.queue(pidA);
         dao.recordSnapshot(pidA, 10);
         dao.collect(pidA, 10);
-        assertEq(address(dao).balance, 6 ether, "A collected 6");
+        assertEq(_escrowBal(pidA), 6 ether, "A's escrow holds 6");
 
         // B: vaults now hold 4 ETH (10 - 6 pulled by A's collect). B requests 6 → shortfall.
         dao.queue(pidB);
         dao.recordSnapshot(pidB, 10);
         dao.collect(pidB, 10);
-        assertEq(address(dao).balance, 10 ether, "DAO now holds A's 6 + B's 4");
+        assertEq(_escrowBal(pidB), 4 ether, "B's escrow holds only 4 (shortfall)");
+        assertEq(address(dao).balance, 0, "facade custodies nothing");
 
-        // ISOLATION: B cannot finalize even though the DAO contract holds 10 ETH — B's own
-        // collected ledger is only 4.
+        // ISOLATION: B cannot finalize. Its own escrow holds only 4 — and A's 6 sit in a DIFFERENT
+        // escrow B can't reach. Both the ledger gate and the escrow-balance solvency check block it.
         vm.expectRevert(ShwounsDAOProposals.InsufficientCollected.selector);
         dao.finalize(pidB);
 
         // A is unaffected and finalizes against its own 6.
         dao.finalize(pidA);
         assertEq(recipientA.balance, 6 ether, "A executed");
-        assertEq(address(dao).balance, 4 ether, "only B's 4 remains");
+        assertEq(_escrowBal(pidA), 0, "A's escrow drained");
+        assertEq(_escrowBal(pidB), 4 ether, "B's escrow untouched by A");
 
         // Top up B's 2 ETH shortfall, then B finalizes.
         dao.topUp{value: 2 ether}(pidB, address(0), 2 ether);
         dao.finalize(pidB);
         assertEq(recipientB.balance, 6 ether, "B executed after top-up");
-        assertEq(address(dao).balance, 0, "DAO fully drained");
+        assertEq(_escrowBal(pidB), 0, "B's escrow drained");
     }
 
     /// refundStuckProposal returns ONLY what was actually collected (pro-rata by snapshot share),
@@ -314,8 +330,8 @@ contract LifecycleInvariantsTest is Test {
 
         dao.collect(pid, 10);
         // Collected = bob 3 + carol 1.2 = 4.2 (alice 0). NOT the requested 6.
-        uint256 collected = address(dao).balance;
-        assertEq(collected, 4.2 ether, "collected only bob+carol shares");
+        uint256 collected = _escrowBal(pid);
+        assertEq(collected, 4.2 ether, "escrow holds only bob+carol shares");
 
         uint256 aliceBefore = alice.balance;
         uint256 bobBefore = bob.balance;
@@ -325,9 +341,9 @@ contract LifecycleInvariantsTest is Test {
         assets[0] = address(0);
         dao.refundStuckProposal(pid, assets);
 
-        // The DAO can only refund what it holds: total refunded == collected (4.2), distributed
+        // The escrow can only refund what it holds: total refunded == collected (4.2), distributed
         // pro-rata by snapshot share (alice 3/10, bob 5/10, carol 2/10 of 4.2).
-        assertEq(address(dao).balance, 0, "DAO emptied, never over-refunded");
+        assertEq(_escrowBal(pid), 0, "escrow emptied, never over-refunded");
         assertEq(alice.balance - aliceBefore, 4.2 ether * 3 / 10, "alice owner share of collected");
         assertEq(bob.balance - bobBefore, 4.2 ether * 5 / 10, "bob owner share of collected");
         assertEq(carol.balance - carolBefore, 4.2 ether * 2 / 10, "carol owner share of collected");

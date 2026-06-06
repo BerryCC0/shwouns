@@ -50,6 +50,10 @@ contract AuditFindingsTest is LifecycleInvariantsTest {
         proposalId = dao.propose(targets, values, signatures, calldatas, "audit PoC");
     }
 
+    /// C-01 (FIXED — regression). A recipient re-entering finalize hits the global execution lock;
+    /// the nested call reverts, fails the action, and rolls the whole attempt back atomically. No
+    /// double-spend, and the victim's funds — in a SEPARATE escrow — are untouched, so the victim
+    /// still finalizes with its full 2 ETH.
     function test_audit_finalizeReentrancySpendsAnotherProposalsETH() public {
         uint256 victimProposal = _proposeETH(alice, recipientA, 2 ether);
         _passToSucceeded(victimProposal);
@@ -61,13 +65,26 @@ contract AuditFindingsTest is LifecycleInvariantsTest {
         _queueSnapshotCollect(attackProposal, 100);
         attacker.setProposalId(attackProposal);
 
-        assertEq(address(dao).balance, 3 ether);
+        // Per-proposal custody: victim escrow holds 2, attack escrow holds 1, facade holds nothing.
+        assertEq(_escrowBal(victimProposal), 2 ether, "victim escrow funded");
+        assertEq(_escrowBal(attackProposal), 1 ether, "attack escrow funded");
+        assertEq(address(dao).balance, 0, "facade custodies nothing");
+
+        // The attacker's receive() re-enters finalize(attackProposal); the nested call reverts on
+        // the global execution lock, which fails the action and reverts the whole finalize.
+        vm.expectRevert();
         dao.finalize(attackProposal);
 
-        assertEq(address(attacker).balance, 2 ether, "one approved payment executed twice");
-        assertEq(address(dao).balance, 1 ether, "victim proposal lost 1 ETH");
-        vm.expectRevert();
+        // Nothing stolen, nothing leaked: both escrows intact, the execution lock is cleared.
+        assertEq(_escrowBal(attackProposal), 1 ether, "attack escrow intact after revert");
+        assertEq(_escrowBal(victimProposal), 2 ether, "victim escrow untouched");
+        assertFalse(dao.executing(), "execution lock cleared after atomic rollback");
+        assertEq(dao.activeProposalId(), 0, "no active proposal lingering");
+
+        // The victim finalizes normally with its full 2 ETH — never drained by the attacker.
         dao.finalize(victimProposal);
+        assertEq(recipientA.balance, 2 ether, "victim paid in full");
+        assertEq(_escrowBal(victimProposal), 0, "victim escrow drained by its own finalize");
     }
 
     function test_audit_cancelAfterPartialCollectPermanentlyStrandsFunds() public {
@@ -77,18 +94,23 @@ contract AuditFindingsTest is LifecycleInvariantsTest {
         dao.recordSnapshot(proposalId, 100);
         dao.collect(proposalId, 1);
 
-        uint256 stranded = address(dao).balance;
+        // Funds collected so far now sit in the proposal's escrow (per-proposal custody).
+        uint256 stranded = _escrowBal(proposalId);
         assertGt(stranded, 0);
 
         vm.prank(alice);
         dao.cancel(proposalId);
         assertEq(uint256(dao.state(proposalId)), uint256(ShwounsDAOTypes.ProposalState.Canceled));
 
+        // BUG still present pre-§C: a Canceled proposal can't be refunded (refundStuckProposal
+        // requires Collected), so the partial collection is stranded in the escrow. §C (Phase 4)
+        // routes funded Canceled/Vetoed proposals into the refund path and flips this assertion to
+        // "fully recoverable".
         address[] memory assets = new address[](1);
         assets[0] = address(0);
         vm.expectRevert();
         dao.refundStuckProposal(proposalId, assets);
-        assertEq(address(dao).balance, stranded);
+        assertEq(_escrowBal(proposalId), stranded);
     }
 
     function test_audit_approvalActionDrainsAnotherProposalsERC20() public {
@@ -106,7 +128,11 @@ contract AuditFindingsTest is LifecycleInvariantsTest {
         uint256 victimProposal = dao.propose(targets, values, signatures, calldatas, "victim ERC20 transfer");
         _passToSucceeded(victimProposal);
         _queueSnapshotCollect(victimProposal, 100);
-        assertEq(asset.balanceOf(address(dao)), 100 ether);
+
+        // The victim's ERC-20 is isolated in its own escrow, never the shared facade.
+        address victimEscrow = dao.escrowAddressOf(victimProposal);
+        assertEq(asset.balanceOf(victimEscrow), 100 ether, "victim ERC-20 isolated in its escrow");
+        assertEq(asset.balanceOf(address(dao)), 0, "facade custodies no ERC-20");
 
         address attacker = makeAddr("allowanceAttacker");
         uint256 attackProposal = _proposeCall(
@@ -115,13 +141,25 @@ contract AuditFindingsTest is LifecycleInvariantsTest {
         _passToSucceeded(attackProposal);
         dao.queue(attackProposal);
         dao.finalize(attackProposal);
+        address attackEscrow = dao.escrowAddressOf(attackProposal);
 
+        // C-02 (FIXED — regression). The malicious approve was made BY the attack escrow over its
+        // OWN (empty) balance. It confers no allowance over the victim escrow or the facade.
+        assertEq(asset.allowance(attackEscrow, attacker), type(uint256).max, "approve isolated to attack escrow");
+        assertEq(asset.allowance(victimEscrow, attacker), 0, "no allowance over victim escrow");
+        assertEq(asset.allowance(address(dao), attacker), 0, "no allowance over facade");
+
+        // transferFrom against the empty attack escrow reverts (insufficient balance). Nothing
+        // drained from the victim escrow or the facade.
         vm.prank(attacker);
-        asset.transferFrom(address(dao), attacker, 100 ether);
-        assertEq(asset.balanceOf(attacker), 100 ether);
-
         vm.expectRevert();
+        asset.transferFrom(attackEscrow, attacker, 100 ether);
+        assertEq(asset.balanceOf(attacker), 0, "attacker drained nothing");
+        assertEq(asset.balanceOf(victimEscrow), 100 ether, "victim escrow intact");
+
+        // The victim finalizes normally and pays recipientA in full.
         dao.finalize(victimProposal);
+        assertEq(asset.balanceOf(recipientA), 100 ether, "victim executed in full");
     }
 
     function test_audit_zeroERC20WithdrawalRemovesFundedVaultFromActiveSet() public {

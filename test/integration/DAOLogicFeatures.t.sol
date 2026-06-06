@@ -12,6 +12,7 @@ import {ShwounsVaultRegistry} from "../../src/vault/ShwounsVaultRegistry.sol";
 import {ShwounsDAOLogic} from "../../src/governance/ShwounsDAOLogic.sol";
 import {ShwounsDAOTypes, IShwounsTokenLike} from "../../src/governance/ShwounsDAOInterfaces.sol";
 import {ShwounsDAOProposals} from "../../src/governance/ShwounsDAOProposals.sol";
+import {ProposalEscrow} from "../../src/governance/ProposalEscrow.sol";
 
 import {ERC6551Registry} from "../mocks/ERC6551Registry.sol";
 import {MockDescriptor} from "../mocks/MockDescriptor.sol";
@@ -75,6 +76,11 @@ contract DAOTestBase is Test {
         dao = ShwounsDAOLogic(payable(address(daoProxy)));
 
         registry.setDAOLogic(address(dao));
+
+        // Per-proposal escrow implementation (clone source). Collected funds live in each
+        // proposal's escrow, not the facade.
+        ProposalEscrow escrowImpl = new ProposalEscrow(address(dao), address(0xBEEF));
+        dao.setProposalEscrowImplementation(address(escrowImpl));
 
         // Mint and distribute
         aliceNoun = _mintTo(alice);
@@ -331,7 +337,7 @@ contract DAORefundStuckTest is DAOTestBase {
         vm.expectRevert();
         dao.finalize(pid);
 
-        assertEq(address(dao).balance, 5 ether, "DAO holds the collected 5 ETH");
+        assertEq(dao.escrowAddressOf(pid).balance, 5 ether, "escrow holds the collected 5 ETH");
 
         // Refund — proportional to the snapshot, returns ETH to current owners
         address[] memory assets = new address[](1);
@@ -346,7 +352,7 @@ contract DAORefundStuckTest is DAOTestBase {
         assertEq(alice.balance - aliceBefore, 1.5 ether);
         assertEq(bob.balance - bobBefore, 2.5 ether);
         assertEq(carol.balance - carolBefore, 1.0 ether);
-        assertEq(address(dao).balance, 0);
+        assertEq(dao.escrowAddressOf(pid).balance, 0, "escrow drained after refund");
     }
 }
 
@@ -490,8 +496,9 @@ contract DAOMultiAssetTest is DAOTestBase {
         // alice contributes 175 * 100/350 = 50
         // bob contributes 175 * 200/350 = 100
         // carol contributes 175 * 50/350 = 25
-        // Total = 175 in DAOLogic
-        assertEq(usdc.balanceOf(address(dao)), 175e18);
+        // Total = 175 in the proposal's escrow (per-proposal custody)
+        assertEq(usdc.balanceOf(dao.escrowAddressOf(pid)), 175e18);
+        assertEq(usdc.balanceOf(address(dao)), 0, "facade custodies no ERC-20");
 
         dao.finalize(pid);
         assertEq(usdc.balanceOf(recipient), 175e18);
@@ -528,7 +535,7 @@ contract DAOMultiAssetTest is DAOTestBase {
 
         dao.recordSnapshot(pid, 10);
         dao.collect(pid, 10);
-        assertEq(usdc.balanceOf(address(dao)), 175e18, "collected 175 USDC");
+        assertEq(usdc.balanceOf(dao.escrowAddressOf(pid)), 175e18, "collected 175 USDC into escrow");
 
         dao.finalize(pid);
         assertEq(usdc.balanceOf(recipient), 175e18, "signature-form transfer executed");

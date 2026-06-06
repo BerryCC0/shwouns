@@ -17,9 +17,11 @@ pragma solidity ^0.8.19;
 import { ShwounsDAOTypes, ShwounsDAOEvents, IShwounsTokenLike } from "./ShwounsDAOInterfaces.sol";
 import { IShwounsVaultRegistry } from "../vault/IShwounsVaultRegistry.sol";
 import { ShwounsVault } from "../vault/ShwounsVault.sol";
+import { IProposalEscrow } from "./ProposalEscrow.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import { SignatureChecker } from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
+import { Clones } from "@openzeppelin/contracts/proxy/Clones.sol";
 
 library ShwounsDAOProposals {
     /// @dev The 4-byte selector for ERC-20 transfer(address,uint256). Used to detect
@@ -56,6 +58,8 @@ library ShwounsDAOProposals {
     error OnlyVetoer();
     error NotAuthorized();
     error OnlyAgainstVotesDuringObjection();
+    error AlreadyExecuting();
+    error EscrowImplNotSet();
 
     // -------------------------------------------------------------------------
     // Re-emit events to enable indexer simplicity (library events bubble up)
@@ -290,6 +294,14 @@ library ShwounsDAOProposals {
     ) public view returns (ShwounsDAOTypes.ProposalState) {
         ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
         if (p.id == 0) revert ProposalDoesNotExist();
+        // Highest precedence (review §3): a proposal mid-finalize is Executing — a distinct
+        // transient state observed BEFORE any terminal flag. terminal `executed` is not yet set
+        // during execution, and cancel()/veto() explicitly reject Executing, so contradictory
+        // terminal combinations are unreachable. Setting `executed` before the calls (the v5
+        // mistake) would have let a reentrant rescue pass its terminal gate mid-execution.
+        if (ds.executing && ds.activeProposalId == proposalId) {
+            return ShwounsDAOTypes.ProposalState.Executing;
+        }
         if (p.vetoed) return ShwounsDAOTypes.ProposalState.Vetoed;
         if (p.canceled) return ShwounsDAOTypes.ProposalState.Canceled;
         if (p.executed) return ShwounsDAOTypes.ProposalState.Executed;
@@ -384,13 +396,16 @@ library ShwounsDAOProposals {
     function cancel(ShwounsDAOTypes.Storage storage ds, uint256 proposalId) external {
         ShwounsDAOTypes.ProposalState s = state(ds, proposalId);
         // Cannot cancel at a terminal state, nor once funds have been collected into the DAO
-        // (a stuck Collected proposal is unwound via refundStuckProposal, not cancel).
+        // (a stuck Collected proposal is unwound via refundStuckProposal, not cancel), nor while
+        // the proposal is Executing — a reentrant callback could otherwise satisfy the cancel
+        // threshold mid-finalize and write a contradictory terminal flag (review §6/§7).
         if (
             s == ShwounsDAOTypes.ProposalState.Canceled ||
             s == ShwounsDAOTypes.ProposalState.Defeated ||
             s == ShwounsDAOTypes.ProposalState.Expired ||
             s == ShwounsDAOTypes.ProposalState.Executed ||
             s == ShwounsDAOTypes.ProposalState.Vetoed ||
+            s == ShwounsDAOTypes.ProposalState.Executing ||
             s == ShwounsDAOTypes.ProposalState.Collected
         ) revert InvalidProposalState();
 
@@ -418,7 +433,13 @@ library ShwounsDAOProposals {
     function veto(ShwounsDAOTypes.Storage storage ds, uint256 proposalId) external {
         if (msg.sender != ds.vetoer) revert OnlyVetoer();
         ShwounsDAOTypes.ProposalState s = state(ds, proposalId);
-        if (s == ShwounsDAOTypes.ProposalState.Executed) revert InvalidProposalState();
+        // The veto is an emergency brake and stays available even after funds are moving (H-01:
+        // funded → refundable). It is rejected only at the terminal Executed state and while the
+        // proposal is mid-finalize (Executing) — a vetoer may be a contract and could otherwise
+        // veto from inside an action callback, writing a contradictory terminal flag (review §7).
+        if (s == ShwounsDAOTypes.ProposalState.Executed || s == ShwounsDAOTypes.ProposalState.Executing) {
+            revert InvalidProposalState();
+        }
         ds._proposals[proposalId].vetoed = true;
         emit ProposalVetoed(proposalId);
     }
@@ -429,12 +450,21 @@ library ShwounsDAOProposals {
 
     function queue(ShwounsDAOTypes.Storage storage ds, uint256 proposalId) external {
         if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Succeeded) revert InvalidProposalState();
+        if (ds.proposalEscrowImplementation == address(0)) revert EscrowImplNotSet();
 
         ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
         ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
 
         // Extract assets + per-asset requested amounts from the proposal's actions.
         _extractAssetsAndAmounts(ds, proposalId, p.targets, p.values, p.signatures, p.calldatas);
+
+        // Deploy this proposal's escrow EAGERLY at queue (A1). Deterministic EIP-1167 clone,
+        // CREATE2 salt = proposalId, deployer = this DAOLogic proxy (the library runs in the
+        // facade's context). ALL of the proposal's actions execute from this unique single-use
+        // escrow at finalize, and collect/topUp route funds into it — isolating the proposal's
+        // assets (and any stray output asset) to an identity only this proposal can drive. Even a
+        // pure-governance (zero-funding) proposal gets one, because it too executes via the escrow.
+        Clones.cloneDeterministic(ds.proposalEscrowImplementation, bytes32(proposalId));
 
         // C1: freeze the active vault-ID SET at queue time. recordSnapshot pages over this
         // stable copy, so the live registry active-set changing underneath us (deposits/
@@ -579,8 +609,11 @@ library ShwounsDAOProposals {
         uint256 end = start + batchSize;
         if (end > ss.snapshottedVaults.length) end = ss.snapshottedVaults.length;
 
+        // Pull straight into THIS proposal's escrow (per-proposal custody), never the shared
+        // facade. The escrow is the deterministic CREATE2 address deployed at queue.
+        address escrow = escrowAddressOf(ds, proposalId);
         for (uint256 i = start; i < end; i++) {
-            _collectFromVault(ds, ss, proposalId, ss.snapshottedVaults[i]);
+            _collectFromVault(ds, ss, proposalId, ss.snapshottedVaults[i], escrow);
         }
         ss.collectProgress = end;
 
@@ -593,12 +626,13 @@ library ShwounsDAOProposals {
         ShwounsDAOTypes.Storage storage ds,
         ShwounsDAOTypes.SnapshotState storage ss,
         uint256 proposalId,
-        uint256 shwounId
+        uint256 shwounId,
+        address escrow
     ) internal {
         address vault = ds.vaultRegistry.vaultOf(shwounId);
         uint256 assetCount = ss.assets.length;
         for (uint256 j = 0; j < assetCount; j++) {
-            _collectAsset(ss, proposalId, shwounId, vault, ss.assets[j]);
+            _collectAsset(ss, proposalId, shwounId, vault, ss.assets[j], escrow);
         }
     }
 
@@ -607,7 +641,8 @@ library ShwounsDAOProposals {
         uint256 proposalId,
         uint256 shwounId,
         address vault,
-        address asset
+        address asset,
+        address escrow
     ) internal {
         uint256 snapshotBalance = ss.vaultSnapshot[shwounId][asset];
         if (snapshotBalance == 0) return;
@@ -638,7 +673,7 @@ library ShwounsDAOProposals {
         if (actual > outstanding) actual = outstanding;
 
         if (actual > 0) {
-            ShwounsVault(payable(vault)).pullProRata(proposalId, asset, address(this), actual);
+            ShwounsVault(payable(vault)).pullProRata(proposalId, asset, escrow, actual);
             ss.collected[asset] += actual; // C4: per-proposal ledger (isolates this proposal's funds)
             emit AssetCollectedFromVault(proposalId, shwounId, asset, actual);
         }
@@ -649,35 +684,120 @@ library ShwounsDAOProposals {
     // =========================================================================
 
     function finalize(ShwounsDAOTypes.Storage storage ds, uint256 proposalId) external {
+        // Global execution lock FIRST (review §4: `require(!_executing)`). Only one proposal may
+        // execute at a time, and no nested finalize — of this OR any other proposal — can run while
+        // one is in flight. This is the C-01 fix: a recipient re-entering finalize hits this lock.
+        if (ds.executing) revert AlreadyExecuting();
         if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Collected) revert InvalidProposalState();
 
-        ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
         ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
+        address escrow = escrowAddressOf(ds, proposalId);
 
-        // C4: all-or-nothing. Every requested asset must be fully funded — via collect() and/or
-        // topUp() — before any target call runs. Because the check is against THIS proposal's own
-        // collected ledger, a proposal can never spend funds collected for another proposal, and
-        // a shortfall simply blocks execution (retry after a top-up, or unwind via
-        // refundStuckProposal). No silent scaling of the approved action values.
-        for (uint256 j = 0; j < ss.assets.length; j++) {
-            if (ss.collected[ss.assets[j]] < ss.requestedAmount[ss.assets[j]]) revert InsufficientCollected();
-        }
+        // C4 all-or-nothing ledger gate + a solvency recheck against ACTUAL escrow balances
+        // immediately before the lock (review §4). The escrow holds ONLY this proposal's funds, so
+        // a check against its real balance can never draw on another proposal's money; any
+        // shortfall (a negative rebase, or funds moved out between collect and finalize) BLOCKS
+        // execution rather than executing under-funded — retry after a top-up, or unwind via refund.
+        _requireSolvent(ss, escrow);
 
-        for (uint256 i = 0; i < p.targets.length; i++) {
-            bytes memory cd = _fullCalldata(p.signatures[i], p.calldatas[i]);
-            (bool success, bytes memory result) = p.targets[i].call{value: p.values[i]}(cd);
-            if (!success) {
-                // Bubble up the revert. Funds stay in DAOLogic. Caller can retry.
-                if (result.length > 0) {
-                    assembly { revert(add(result, 32), mload(result)) }
-                }
-                revert("ShwounsDAO::finalize: target call failed");
-            }
-        }
+        // EFFECT before INTERACTION (CEI): set the lock + activeProposalId (→ the transient
+        // Executing status). This — NOT p.executed — is the reentrancy "effect". During execution
+        // the status is Executing, so BOTH a nested finalize (Collected gate + this lock) AND a
+        // nested rescue (terminal gate, added in §A8) revert.
+        ds.executing = true;
+        ds.activeProposalId = proposalId;
 
+        // Have the escrow execute EVERYTHING from its own identity and balance — both value-bearing
+        // and governance actions (C-02: an `approve` here is granted by the escrow over the escrow's
+        // own balance, never the shared pool). execute() bubbles any action's revert (DAOLogic must
+        // NOT catch it) → atomic EVM rollback of the lock, the transient status, and every earlier
+        // action; finalize stays retryable.
+        _executeViaEscrow(ds._proposals[proposalId], escrow);
+
+        // No external call happens between execute returning and these writes → no reentrancy
+        // window. Clear the lock/authentication FIRST, then commit terminal Executed LAST
+        // (round-6 finding 1 — setting Executed before the calls would let a reentrant rescue pass
+        // its terminal gate mid-execution).
+        ds.executing = false;
+        ds.activeProposalId = 0;
         ss.finalized = true;
-        p.executed = true;
+        ds._proposals[proposalId].executed = true;
         emit ProposalExecuted(proposalId);
+    }
+
+    /// @dev Ledger + actual-balance solvency check for every requested asset, against the escrow.
+    function _requireSolvent(
+        ShwounsDAOTypes.SnapshotState storage ss,
+        address escrow
+    ) internal view {
+        for (uint256 j = 0; j < ss.assets.length; j++) {
+            address asset = ss.assets[j];
+            if (ss.collected[asset] < ss.requestedAmount[asset]) revert InsufficientCollected();
+            uint256 bal = asset == address(0) ? escrow.balance : IERC20(asset).balanceOf(escrow);
+            if (bal < ss.requestedAmount[asset]) revert InsufficientCollected();
+        }
+    }
+
+    /// @dev Build the proposal's action list (GovernorBravo signature-form expanded to final
+    ///      calldata via _fullCalldata) and have the escrow execute it.
+    function _executeViaEscrow(
+        ShwounsDAOTypes.Proposal storage p,
+        address escrow
+    ) internal {
+        uint256 n = p.targets.length;
+        address[] memory targets = new address[](n);
+        uint256[] memory values = new uint256[](n);
+        bytes[] memory cds = new bytes[](n);
+        for (uint256 i = 0; i < n; i++) {
+            targets[i] = p.targets[i];
+            values[i] = p.values[i];
+            cds[i] = _fullCalldata(p.signatures[i], p.calldatas[i]);
+        }
+        IProposalEscrow(escrow).execute(targets, values, cds);
+    }
+
+    // =========================================================================
+    // Escrow address derivation + executor authentication (A1-A3)
+    // =========================================================================
+
+    /// @notice The deterministic escrow address for a proposal. EIP-1167 clone of the locked
+    ///         implementation, CREATE2 salt = proposalId, deployer = this DAOLogic proxy (the
+    ///         library executes in the facade's context, so `address(this)` is the proxy).
+    function escrowAddressOf(
+        ShwounsDAOTypes.Storage storage ds,
+        uint256 proposalId
+    ) internal view returns (address) {
+        return Clones.predictDeterministicAddress(
+            ds.proposalEscrowImplementation, bytes32(proposalId), address(this)
+        );
+    }
+
+    /// @notice The runtime codehash every escrow clone must have. Well-defined ONLY because escrows
+    ///         are identical-runtime EIP-1167 clones of one locked implementation (A3.4) — the
+    ///         clone runtime embeds the impl address and nothing else. A non-clone contract forced
+    ///         to a predicted address fails this check.
+    function _expectedEscrowCodehash(address impl) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(hex"363d3d373d3d3d363d73", impl, hex"5af43d82803e903d91602b57fd5bf3")
+        );
+    }
+
+    /// @notice The canonical executor-authentication predicate (review §5). True iff ALL hold:
+    ///         (1) execution is in progress; (2) there is an active proposal that (3) is in the
+    ///         Executing status; (4) `candidate` is exactly that proposal's deterministic escrow
+    ///         address; and (5) the candidate's code is the expected clone codehash. It never trusts
+    ///         a caller-supplied proposalId, escrow storage, tx.origin, or the escrow's self-report.
+    function isActiveExecutor(
+        ShwounsDAOTypes.Storage storage ds,
+        address candidate
+    ) public view returns (bool) {
+        if (!ds.executing) return false;
+        uint256 pid = ds.activeProposalId;
+        if (pid == 0) return false;
+        if (state(ds, pid) != ShwounsDAOTypes.ProposalState.Executing) return false;
+        if (candidate != escrowAddressOf(ds, pid)) return false;
+        if (candidate.codehash != _expectedEscrowCodehash(ds.proposalEscrowImplementation)) return false;
+        return true;
     }
 
     /// @notice Emitted when someone tops up a proposal's collected ledger to cover a shortfall.
@@ -699,11 +819,15 @@ library ShwounsDAOProposals {
         ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
         if (amount == 0 || ss.requestedAmount[asset] == 0) revert InvalidTopUp();
 
+        // Route the top-up into the proposal's escrow (per-proposal custody), not the shared facade.
+        address escrow = escrowAddressOf(ds, proposalId);
         if (asset == address(0)) {
             if (msg.value != amount) revert InvalidTopUp();
+            (bool ok, ) = escrow.call{ value: amount }("");
+            if (!ok) revert InvalidTopUp();
         } else {
             if (msg.value != 0) revert InvalidTopUp();
-            IERC20(asset).transferFrom(msg.sender, address(this), amount);
+            IERC20(asset).transferFrom(msg.sender, escrow, amount);
         }
         ss.collected[asset] += amount;
         emit ProposalToppedUp(proposalId, asset, amount);
@@ -1070,51 +1194,58 @@ library ShwounsDAOProposals {
 
     event StuckProposalRefunded(uint256 indexed proposalId, address indexed asset, uint256 totalRefunded);
 
-    /// @notice Distribute the funds DAOLogic holds (from collect() on the stuck proposal)
-    ///         back to the snapshotted vaults' current owners, pro-rata to their snapshot share.
-    /// @dev Only callable from facade via admin path. Marks the proposal as finalized to
-    ///      prevent double-spend. Iterates snapshottedVaults; for large sets this may need
-    ///      a paged variant — v1 is single-call.
+    /// @notice Distribute the funds the proposal's escrow holds (from collect()) back to the
+    ///         snapshotted vaults' current owners, pro-rata to their snapshot share.
+    /// @dev Only callable from facade via admin path. Marks the proposal as finalized to prevent
+    ///      double-spend. Iterates snapshottedVaults; the per-vault actually-pulled refund + paging
+    ///      redesign (M-03) lands in §C. Here the funds simply come from the per-proposal escrow.
     function refundStuckProposal(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
         address[] calldata assetsToRefund
     ) external {
+        // No recovery while a finalize is in flight (review §6 — reject refund globally while the
+        // execution lock is held; the active proposal is itself unreachable here since its state is
+        // Executing, not Collected).
+        if (ds.executing) revert AlreadyExecuting();
         ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
         if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Collected) revert InvalidProposalState();
 
-        uint256 vaultCount = ss.snapshottedVaults.length;
+        address escrow = escrowAddressOf(ds, proposalId);
         for (uint256 a = 0; a < assetsToRefund.length; a++) {
             address asset = assetsToRefund[a];
-            uint256 total = ss.totalSnapshotBalance[asset];
-            // C4: distribute only what was ACTUALLY collected for this proposal, pro-rata by
-            // snapshot share — never the snapshot-derived requested amount (which could exceed
-            // collected when vaults were drained between snapshot and collect).
-            uint256 collectedTotal = ss.collected[asset];
-            if (total == 0 || collectedTotal == 0) continue;
-            uint256 distributed = 0;
-            for (uint256 i = 0; i < vaultCount; i++) {
-                uint256 shwounId = ss.snapshottedVaults[i];
-                uint256 snap = ss.vaultSnapshot[shwounId][asset];
-                if (snap == 0) continue;
-                uint256 share = (collectedTotal * snap) / total;
-                if (share == 0) continue;
-                // Transfer to the current owner of the Noun (not the vault)
-                address owner = ds.shwouns.ownerOf(shwounId);
-                if (asset == address(0)) {
-                    (bool ok, ) = owner.call{value: share}("");
-                    require(ok, "refund ETH failed");
-                } else {
-                    IERC20(asset).transfer(owner, share);
-                }
-                distributed += share;
-            }
-            ss.collected[asset] = 0; // drained — prevent any double refund
+            uint256 distributed = _refundAsset(ds, ss, escrow, asset);
             emit StuckProposalRefunded(proposalId, asset, distributed);
         }
 
         ss.finalized = true; // mark as terminal — cannot finalize() again
         ds._proposals[proposalId].executed = true; // surface as Executed in state()
+    }
+
+    /// @dev Distribute one asset's collected total, pro-rata by snapshot share, to the current Noun
+    ///      owners, paying out of the proposal's escrow. Distributes only what was ACTUALLY
+    ///      collected (never the snapshot-derived requested amount). Zeroes the ledger to bar any
+    ///      double refund. Returns the amount distributed.
+    function _refundAsset(
+        ShwounsDAOTypes.Storage storage ds,
+        ShwounsDAOTypes.SnapshotState storage ss,
+        address escrow,
+        address asset
+    ) internal returns (uint256 distributed) {
+        uint256 total = ss.totalSnapshotBalance[asset];
+        uint256 collectedTotal = ss.collected[asset];
+        if (total == 0 || collectedTotal == 0) return 0;
+        uint256 vaultCount = ss.snapshottedVaults.length;
+        for (uint256 i = 0; i < vaultCount; i++) {
+            uint256 shwounId = ss.snapshottedVaults[i];
+            uint256 snap = ss.vaultSnapshot[shwounId][asset];
+            if (snap == 0) continue;
+            uint256 share = (collectedTotal * snap) / total;
+            if (share == 0) continue;
+            IProposalEscrow(escrow).payOut(asset, ds.shwouns.ownerOf(shwounId), share);
+            distributed += share;
+        }
+        ss.collected[asset] = 0; // drained — prevent any double refund
     }
 
     // =========================================================================

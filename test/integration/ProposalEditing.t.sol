@@ -11,6 +11,7 @@ import {ShwounsVaultRegistry} from "../../src/vault/ShwounsVaultRegistry.sol";
 import {ShwounsDAOLogic} from "../../src/governance/ShwounsDAOLogic.sol";
 import {ShwounsDAOProposals} from "../../src/governance/ShwounsDAOProposals.sol";
 import {ShwounsDAOTypes, IShwounsTokenLike} from "../../src/governance/ShwounsDAOInterfaces.sol";
+import {ProposalEscrow} from "../../src/governance/ProposalEscrow.sol";
 
 import {ERC6551Registry} from "../mocks/ERC6551Registry.sol";
 import {MockDescriptor} from "../mocks/MockDescriptor.sol";
@@ -64,6 +65,10 @@ contract ProposalEditingTest is Test {
             abi.encodeWithSelector(ShwounsDAOLogic.initialize.selector,
                 address(this), address(0), IShwounsTokenLike(address(token)), registry, params, dq)))));
         registry.setDAOLogic(address(dao));
+
+        // Per-proposal escrow implementation (clone source).
+        ProposalEscrow escrowImpl = new ProposalEscrow(address(dao), address(0xBEEF));
+        dao.setProposalEscrowImplementation(address(escrowImpl));
 
         proposer = makeAddr("proposer");
         (sigA, sigAPk) = makeAddrAndKey("sigA");

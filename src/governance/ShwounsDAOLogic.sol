@@ -65,8 +65,12 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
     /// @notice The maximum number of actions per proposal.
     function proposalMaxOperations() public pure returns (uint256) { return 10; }
 
+    /// @notice Admin gate. Accepts the structural admin OR the currently-authenticated active
+    ///         proposal escrow (A5) — so an approved governance action, executing from its escrow,
+    ///         can change DAO parameters / admin within its own finalize frame, while no other
+    ///         caller (stale, forged, or cross-proposal) ever passes.
     modifier onlyAdmin() {
-        if (msg.sender != ds.admin) revert OnlyAdmin();
+        if (msg.sender != ds.admin && !ds.isActiveExecutor(msg.sender)) revert OnlyAdmin();
         _;
     }
 
@@ -341,11 +345,57 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
 
     function finalize(uint256 proposalId) external {
         ds.finalize(proposalId);
-        // If GovernanceRewards is wired, allocate this proposal's voter reward pool.
-        // Wrapped in try/catch so a misconfigured GR doesn't brick finalize.
+        // Reward allocation occurs only AFTER terminal Executed is committed (review §4). Wrapped
+        // in try/catch so a misconfigured GR doesn't brick finalize.
         if (address(governanceRewards) != address(0)) {
             try governanceRewards.allocateProposalReward(proposalId) {} catch {}
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Execution model — per-proposal escrow + executor authentication (A1-A5)
+    // -------------------------------------------------------------------------
+
+    error EscrowImplLocked();
+
+    event ProposalEscrowImplementationSet(address indexed impl);
+
+    /// @notice Set the ProposalEscrow implementation (the EIP-1167 clone source). One-shot: set at
+    ///         bootstrap, then permanently locked. Every proposal's escrow is a deterministic clone
+    ///         of this implementation, and both the predicted escrow address and the expected clone
+    ///         codehash derive from it — so it must never change once any proposal has queued.
+    function setProposalEscrowImplementation(address impl) external onlyAdmin {
+        if (ds.proposalEscrowImplementationLocked) revert EscrowImplLocked();
+        if (impl == address(0)) revert InvalidAddress();
+        ds.proposalEscrowImplementation = impl;
+        ds.proposalEscrowImplementationLocked = true;
+        emit ProposalEscrowImplementationSet(impl);
+    }
+
+    function proposalEscrowImplementation() external view returns (address) {
+        return ds.proposalEscrowImplementation;
+    }
+
+    /// @notice The deterministic escrow address for a proposal (clone of the locked impl, CREATE2
+    ///         salt = proposalId, deployer = this proxy). Well-defined before the escrow is deployed.
+    function escrowAddressOf(uint256 proposalId) external view returns (address) {
+        return ds.escrowAddressOf(proposalId);
+    }
+
+    /// @notice The canonical executor-authentication result, read by governed contracts (via the
+    ///         GovernanceAuthRegistry, §A5) and by this contract's own onlyAdmin gate.
+    function isActiveExecutor(address candidate) external view returns (bool) {
+        return ds.isActiveExecutor(candidate);
+    }
+
+    /// @notice The global execution lock and the proposal currently Executing (0 = none). Exposed
+    ///         for off-chain observers and the storage/auth invariant tests.
+    function executing() external view returns (bool) {
+        return ds.executing;
+    }
+
+    function activeProposalId() external view returns (uint256) {
+        return ds.activeProposalId;
     }
 
     /// @notice Cast a vote AND get gas refunded by GovernanceRewards (capped at GR's

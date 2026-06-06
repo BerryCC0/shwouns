@@ -10,6 +10,7 @@ import {ShwounsVault} from "../../src/vault/ShwounsVault.sol";
 import {ShwounsVaultRegistry} from "../../src/vault/ShwounsVaultRegistry.sol";
 import {ShwounsDAOLogic} from "../../src/governance/ShwounsDAOLogic.sol";
 import {ShwounsDAOTypes, IShwounsTokenLike} from "../../src/governance/ShwounsDAOInterfaces.sol";
+import {ProposalEscrow} from "../../src/governance/ProposalEscrow.sol";
 
 import {ERC6551Registry} from "../mocks/ERC6551Registry.sol";
 import {MockDescriptor} from "../mocks/MockDescriptor.sol";
@@ -76,6 +77,11 @@ contract DAOLogicLifecycleTest is Test {
 
         // Wire DAOLogic into registry (so vault.pullProRata is gated correctly)
         registry.setDAOLogic(address(dao));
+
+        // Per-proposal escrow implementation (clone source). Collected funds live in the proposal's
+        // escrow, not the facade.
+        ProposalEscrow escrowImpl = new ProposalEscrow(address(dao), address(0xBEEF));
+        dao.setProposalEscrowImplementation(address(escrowImpl));
 
         // Mint 3 auction Shwouns directly (this contract is the minter).
         // Each mint() may also produce a founder Shwoun at multiples of 10.
@@ -198,12 +204,14 @@ contract DAOLogicLifecycleTest is Test {
         vaultIds[1] = bobNoun;
         vaultIds[2] = carolNoun;
 
-        uint256 daoBalanceBefore = address(dao).balance;
+        address escrow = dao.escrowAddressOf(proposalId);
+        uint256 escrowBefore = escrow.balance;
         dao.collect(proposalId, vaultIds.length);
 
-        // Total drawn should be 6 ETH (the requested amount)
-        uint256 drawn = address(dao).balance - daoBalanceBefore;
-        assertEq(drawn, 6 ether, "DAO collected 6 ETH");
+        // Total drawn into the proposal's escrow should be 6 ETH (the requested amount)
+        uint256 drawn = escrow.balance - escrowBefore;
+        assertEq(drawn, 6 ether, "escrow collected 6 ETH");
+        assertEq(address(dao).balance, 0, "facade never custodies collected funds");
 
         // Pro-rata: alice 1.8, bob 3.0, carol 1.2 (total 6 from 10)
         assertEq(address(aliceVault).balance, 3 ether - 1.8 ether);
@@ -221,7 +229,8 @@ contract DAOLogicLifecycleTest is Test {
         dao.finalize(proposalId);
 
         assertEq(proposalRecipient.balance, 6 ether, "recipient received 6 ETH");
-        assertEq(address(dao).balance, 0, "DAOLogic balance returned to 0");
+        assertEq(escrow.balance, 0, "escrow drained after finalize");
+        assertEq(address(dao).balance, 0, "facade balance still 0");
 
         assertEq(
             uint256(dao.state(proposalId)),
@@ -270,6 +279,6 @@ contract DAOLogicLifecycleTest is Test {
         // Bob's share: 6 * 5/10 = 3 ETH
         // Carol's share: 6 * 2/10 = 1.2 ETH
         // Total collected: 4.2 ETH (shortfall of 1.8 ETH)
-        assertEq(address(dao).balance, 4.2 ether, "DAO has bob+carol shares only");
+        assertEq(dao.escrowAddressOf(proposalId).balance, 4.2 ether, "escrow has bob+carol shares only");
     }
 }

@@ -10,6 +10,7 @@ import {ShwounsVault} from "../../src/vault/ShwounsVault.sol";
 import {ShwounsVaultRegistry} from "../../src/vault/ShwounsVaultRegistry.sol";
 import {ShwounsDAOLogic} from "../../src/governance/ShwounsDAOLogic.sol";
 import {ShwounsDAOTypes, IShwounsTokenLike} from "../../src/governance/ShwounsDAOInterfaces.sol";
+import {ProposalEscrow} from "../../src/governance/ProposalEscrow.sol";
 
 import {GovernanceRewards} from "../../src/rewards/GovernanceRewards.sol";
 import {GovernanceIncentivesNFT} from "../../src/rewards/GovernanceIncentivesNFT.sol";
@@ -102,6 +103,10 @@ contract Phase5RewardsTest is Test {
         rewards.setDAOLogic(address(dao));
         rewards.setApprovalRegistry(approvalRegistry);
         dao.setGovernanceRewards(address(rewards));
+
+        // Per-proposal escrow implementation (clone source); residual sink = GovernanceRewards.
+        ProposalEscrow escrowImpl = new ProposalEscrow(address(dao), address(rewards));
+        dao.setProposalEscrowImplementation(address(escrowImpl));
 
         // ApprovalRegistry: ownership transfers to the DAO so governance controls approvals.
         // For the test we keep ownership in this contract so we can call .approve() directly.
