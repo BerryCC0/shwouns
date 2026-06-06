@@ -296,25 +296,24 @@ contract ShwounsVaultTest is Test {
         registry.markActive(NOUN_ID);
     }
 
-    function test_markPossiblyInactive_removesEmptyVault() public {
+    /// M-02: the active set is append-only. markPossiblyInactive no longer evicts on a zero balance
+    /// (that eviction was the bug — a fully-drained-of-ETH but ERC-20-funded vault could vanish, and
+    /// `withdrawERC20(..., 0)` could grief). recordSnapshot skips zero-balance vaults at snapshot
+    /// time, so correctness never needed removal.
+    function test_markPossiblyInactive_isNoOp_setIsAppendOnly() public {
         ShwounsVault vault = _vaultFor(NOUN_ID);
-        vm.deal(address(vault), 3 ether);
 
-        // First mark active
-        vm.prank(bob);
-        vault.deposit{value: 0}(); // no-op deposit just to wire the call path
-        // ETH was transferred via vm.deal — manually trigger active marking
         vm.deal(bob, 1);
         vm.prank(bob);
         vault.deposit{value: 1}();
-        assertEq(registry.activeVaultsLength(), 1);
+        assertEq(registry.activeVaultsLength(), 1, "marked active on deposit");
 
-        // Alice fully drains
+        // Alice fully drains — under append-only the vault STAYS in the active set.
         vm.prank(alice);
         vault.withdraw(alice, address(vault).balance);
 
         assertEq(address(vault).balance, 0);
-        assertEq(registry.activeVaultsLength(), 0);
+        assertEq(registry.activeVaultsLength(), 1, "append-only: not evicted on zero balance");
     }
 
     function test_markPossiblyInactive_doesNotRemoveStillFundedVault() public {

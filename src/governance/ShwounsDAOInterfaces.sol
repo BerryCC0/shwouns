@@ -242,6 +242,13 @@ interface ShwounsDAOTypes {
         /// @notice True once queue() has run. Distinguishes a queued zero-funding proposal
         ///         (snapshotTargetCount == 0) from a never-queued one (C3).
         bool queued;
+        // -- Appended for the M-05 paged freeze (append-only; do not reorder) --
+        /// @notice Number of active vaults already copied into frozenVaultIds. queue() snapshots
+        ///         snapshotTargetCount = activeVaultsLength() and freezes a bounded first batch;
+        ///         freezeVaults() pages the remainder. recordSnapshot reverts until
+        ///         freezeProgress == snapshotTargetCount. Sound because the active set is
+        ///         append-only (M-02): indices [0, snapshotTargetCount) never shift.
+        uint256 freezeProgress;
     }
 
     struct Receipt {

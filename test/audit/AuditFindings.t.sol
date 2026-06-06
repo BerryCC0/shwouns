@@ -7,6 +7,8 @@ import {ShwounsDAOTypes} from "../../src/governance/ShwounsDAOInterfaces.sol";
 import {GovernanceRewards} from "../../src/rewards/GovernanceRewards.sol";
 import {GovernanceIncentivesNFT} from "../../src/rewards/GovernanceIncentivesNFT.sol";
 import {ApprovalRegistry} from "../../src/rewards/ApprovalRegistry.sol";
+import {ShwounsVaultRegistry} from "../../src/vault/ShwounsVaultRegistry.sol";
+import {IERC6551Registry} from "../../src/vault/erc6551/interfaces/IERC6551Registry.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
@@ -175,19 +177,36 @@ contract AuditFindingsTest is LifecycleInvariantsTest {
         aliceVault.withdrawERC20(address(asset), alice, 0);
         vm.stopPrank();
 
+        // M-02 (FIXED — regression). The active set is append-only: markPossiblyInactive no longer
+        // evicts on a zero ETH balance, so an ERC-20-funded vault stays active and snapshottable.
         assertEq(asset.balanceOf(address(aliceVault)), 100 ether);
-        assertFalse(_containsActiveVault(aliceNoun), "funded vault disappeared from active set");
+        assertTrue(_containsActiveVault(aliceNoun), "ERC-20-funded vault stays active (append-only)");
     }
 
+    /// C-03 (FIXED — regression). (a) The registry refuses to deploy a vault for an unminted token.
+    /// (b) Even force-deploying the vault directly via the canonical ERC-6551 registry and funding
+    /// it does NOT pollute the active set: markActive reverts (token doesn't exist) and the vault
+    /// swallows that revert (_notifyActive is try/catch), so the deposit succeeds but the tokenId
+    /// never enters the active set.
     function test_audit_nonexistentTokenVaultCanPolluteActiveSet() public {
         uint256 nonexistentTokenId = 1_000_000_000;
-        address fakeVault = registry.createVaultFor(nonexistentTokenId);
         assertEq(token.totalSupply(), 4, "token ID is not minted");
 
+        // (a) existence gate
+        vm.expectRevert(ShwounsVaultRegistry.TokenDoesNotExist.selector);
+        registry.createVaultFor(nonexistentTokenId);
+
+        // (b) force-deploy the vault directly, bypassing createVaultFor
+        address forced = IERC6551Registry(CANONICAL_REGISTRY).createAccount(
+            address(vaultImpl), bytes32(0), block.chainid, address(token), nonexistentTokenId
+        );
+        assertEq(forced, registry.vaultOf(nonexistentTokenId), "deterministic address");
+
         vm.deal(address(this), 1 wei);
-        (bool ok,) = fakeVault.call{value: 1 wei}("");
-        assertTrue(ok);
-        assertTrue(_containsActiveVault(nonexistentTokenId));
+        (bool ok,) = forced.call{value: 1 wei}("");
+        assertTrue(ok, "deposit succeeds (notify revert swallowed)");
+        assertEq(forced.balance, 1 wei, "vault funded");
+        assertFalse(_containsActiveVault(nonexistentTokenId), "nonexistent-token vault excluded from active set");
     }
 
     function _containsActiveVault(uint256 tokenId) internal view returns (bool) {

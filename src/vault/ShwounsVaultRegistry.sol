@@ -21,6 +21,7 @@ pragma solidity ^0.8.13;
 /// After step 4 and step 7, the registry is fully configured and immutable in practice.
 
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 import {IERC6551Registry} from "./erc6551/interfaces/IERC6551Registry.sol";
 import {IShwounsVaultRegistry} from "./IShwounsVaultRegistry.sol";
@@ -62,6 +63,7 @@ contract ShwounsVaultRegistry is IShwounsVaultRegistry, GovernedOwnable {
     error AlreadyLocked();
     error NotAuthorizedVault();
     error VaultImplementationNotSet();
+    error TokenDoesNotExist();
 
     constructor(address _shwounsToken, address _governanceAuth) GovernedOwnable(_governanceAuth) {
         if (_shwounsToken == address(0)) revert InvalidAddress();
@@ -108,9 +110,12 @@ contract ShwounsVaultRegistry is IShwounsVaultRegistry, GovernedOwnable {
     }
 
     /// @notice Deploy the vault for a token ID. Idempotent — returns existing address if already
-    ///         deployed. Called by ShwounsToken in _mintTo; can also be called by anyone post-mint.
+    ///         deployed. Called by ShwounsToken on mint; can also be called by anyone post-mint.
+    /// @dev C-03: the bound token MUST exist. Without this gate anyone could deploy vaults for
+    ///      unminted token IDs and inflate the active set until proposal queueing exceeds block gas.
     function createVaultFor(uint256 tokenId) external returns (address) {
         if (vaultImplementation == address(0)) revert VaultImplementationNotSet();
+        _requireTokenExists(tokenId);
         return IERC6551Registry(CANONICAL_ERC6551_REGISTRY).createAccount(
             vaultImplementation,
             SALT,
@@ -120,29 +125,37 @@ contract ShwounsVaultRegistry is IShwounsVaultRegistry, GovernedOwnable {
         );
     }
 
+    /// @dev C-03 existence gate: the bound token must exist (ownerOf succeeds and is non-zero).
+    function _requireTokenExists(uint256 tokenId) internal view {
+        try IERC721(shwounsToken).ownerOf(tokenId) returns (address tokenOwner) {
+            if (tokenOwner == address(0)) revert TokenDoesNotExist();
+        } catch {
+            revert TokenDoesNotExist();
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Vault → Registry callbacks (active-set maintenance)
     // -------------------------------------------------------------------------
 
     /// @inheritdoc IShwounsVaultRegistry
+    /// @dev C-03 defense-in-depth: only a real, minted token's vault can enter the active set.
     function markActive(uint256 tokenId) external {
         _requireCallerIsVault(tokenId);
+        _requireTokenExists(tokenId);
         if (_activeVaults.add(tokenId)) {
             emit VaultMarkedActive(tokenId);
         }
     }
 
     /// @inheritdoc IShwounsVaultRegistry
-    /// @dev Only removes the vault from the active set if its current ETH balance is zero.
-    ///      Vaults may still hold ERC-20s — those are tracked per-asset by DAOLogic at queue time.
-    function markPossiblyInactive(uint256 tokenId) external {
-        _requireCallerIsVault(tokenId);
-        if (msg.sender.balance == 0) {
-            if (_activeVaults.remove(tokenId)) {
-                emit VaultMarkedInactive(tokenId);
-            }
-        }
-    }
+    /// @dev M-02: the active set is APPEND-ONLY ("ever funded"). recordSnapshot skips zero-balance
+    ///      vaults at snapshot time, so correctness never required removal — and balance-inferred
+    ///      removal was the M-02 eviction bug (a zero-ETH but ERC-20-funded vault could be evicted,
+    ///      and `withdrawERC20(..., 0)` could grief). Append-only is also the precondition that
+    ///      makes the paged queue-freeze sound (M-05): indices [0, freezeTarget) never shift.
+    ///      Retained as a no-op for vault-callback / interface compatibility.
+    function markPossiblyInactive(uint256) external {}
 
     function _requireCallerIsVault(uint256 tokenId) internal view {
         if (msg.sender != vaultOf(tokenId)) revert NotAuthorizedVault();

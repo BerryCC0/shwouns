@@ -163,22 +163,21 @@ contract LifecycleInvariantsTest is Test {
     // C1 — vault-set frozen at queue; iteration is robust to active-set mutation
     // =========================================================================
 
-    /// A vault draining itself between queue() and recordSnapshot() removes itself from the
-    /// registry's live active-set (swap-and-pop). Under the old index-into-live-set iteration
-    /// this skipped/duplicated entries and could revert (brick). With the frozen set it must
-    /// page cleanly over the queue-time membership.
-    function test_c1_frozenSet_survivesActiveSetShrink_noBrick() public {
+    /// The vault-set is frozen at queue and the active set is now append-only (M-02): a vault that
+    /// drains itself after queue is NOT removed from the registry, and the frozen membership is
+    /// unaffected. recordSnapshot pages cleanly over the queue-time membership; the drained vault
+    /// simply contributes a zero balance and is excluded from the snapshotted set.
+    function test_c1_frozenSet_robustToPostQueueDrain() public {
         uint256 pid = _proposeETH(alice, recipientA, 6 ether);
         _passToSucceeded(pid);
         dao.queue(pid);
 
-        // Alice drains her vault AFTER queue → registry active-set shrinks 3 → 2 (swap-and-pop).
+        // Alice drains her vault AFTER queue. The active set is append-only, so it stays length 3.
         vm.prank(alice);
         aliceVault.withdraw(alice, 3 ether);
-        assertEq(registry.activeVaultsLength(), 2, "registry active-set shrank");
+        assertEq(registry.activeVaultsLength(), 3, "append-only: set does not shrink on drain");
 
-        // Must NOT revert and must complete the full frozen target (3), even though the live
-        // set is now length 2 (old code: activeVaultAt(2) would revert).
+        // recordSnapshot pages the full frozen target (3) and does not revert/brick.
         dao.recordSnapshot(pid, 10);
         (uint256 progress, uint256 target) = dao.snapshotProgress(pid);
         assertEq(progress, 3, "paged all 3 frozen vaults");

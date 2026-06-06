@@ -70,6 +70,12 @@ library ShwounsDAOProposals {
     error EscrowCodehashMismatch();
     error UpgradeMustBeLastAction();
     error AssetNotFundable();
+    error FreezeNotComplete();
+    error FreezeAlreadyComplete();
+
+    /// @dev M-05: max active vaults frozen within queue() itself. The remainder (for a set larger
+    ///      than this) is paged via freezeVaults() across later txs, keeping per-tx work bounded.
+    uint256 internal constant FREEZE_BATCH_AT_QUEUE = 256;
 
     /// @notice Residual asset kinds for rescueFromEscrow (A8).
     enum AssetKind { ETH, ERC20, ERC721, ERC1155 }
@@ -497,12 +503,47 @@ library ShwounsDAOProposals {
         // current/near-term active-set size; a paged-freeze variant is the follow-up if the
         // active set ever approaches block-gas limits.
         if (ss.assets.length > 0) {
-            ss.frozenVaultIds = ds.vaultRegistry.activeVaults();
-            ss.snapshotTargetCount = ss.frozenVaultIds.length;
+            // M-05: snapshot the freeze TARGET (active-set length) at queue, then freeze a bounded
+            // first batch. The active set is append-only (M-02), so indices [0, target) are stable
+            // and the remainder can be paged via freezeVaults across later txs — keeping per-tx work
+            // bounded (no whole-set copy that could exceed block gas). recordSnapshot is gated until
+            // the freeze completes. A small set (<= FREEZE_BATCH_AT_QUEUE) freezes fully here.
+            ss.snapshotTargetCount = ds.vaultRegistry.activeVaultsLength();
+            _freezeBatch(ds, ss, FREEZE_BATCH_AT_QUEUE);
         }
         ss.queued = true;
 
         emit ProposalQueued(proposalId);
+    }
+
+    /// @notice Page the queue-time vault-set freeze for a set larger than FREEZE_BATCH_AT_QUEUE.
+    ///         Copies the next `batchSize` active-vault indices (within [0, snapshotTargetCount))
+    ///         into the proposal's frozen list. recordSnapshot reverts until this completes.
+    function freezeVaults(
+        ShwounsDAOTypes.Storage storage ds,
+        uint256 proposalId,
+        uint256 batchSize
+    ) external {
+        if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Queued) revert InvalidProposalState();
+        ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
+        if (ss.freezeProgress >= ss.snapshotTargetCount) revert FreezeAlreadyComplete();
+        _freezeBatch(ds, ss, batchSize);
+    }
+
+    /// @dev Copy [freezeProgress, min(freezeProgress+batchSize, snapshotTargetCount)) of the live
+    ///      active set into frozenVaultIds. Append-only (M-02) makes these indices stable.
+    function _freezeBatch(
+        ShwounsDAOTypes.Storage storage ds,
+        ShwounsDAOTypes.SnapshotState storage ss,
+        uint256 batchSize
+    ) internal {
+        uint256 start = ss.freezeProgress;
+        uint256 end = start + batchSize;
+        if (end > ss.snapshotTargetCount) end = ss.snapshotTargetCount;
+        for (uint256 i = start; i < end; i++) {
+            ss.frozenVaultIds.push(ds.vaultRegistry.activeVaultAt(i));
+        }
+        ss.freezeProgress = end;
     }
 
     /// @notice Build the calldata an action actually executes with. GovernorBravo-style actions
@@ -595,6 +636,9 @@ library ShwounsDAOProposals {
         if (s != ShwounsDAOTypes.ProposalState.Queued) revert InvalidProposalState();
 
         ShwounsDAOTypes.SnapshotState storage ss = ds._snapshotState[proposalId];
+        // M-05: the vault-set freeze must be complete before any balance is sampled, so iteration
+        // pages over a fully-frozen, stable membership.
+        if (ss.freezeProgress < ss.snapshotTargetCount) revert FreezeNotComplete();
         uint256 start = ss.snapshotProgress;
         uint256 end = start + batchSize;
         if (end > ss.snapshotTargetCount) end = ss.snapshotTargetCount;

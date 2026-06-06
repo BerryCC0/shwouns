@@ -333,6 +333,12 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
         ds.queue(proposalId);
     }
 
+    /// @notice Page the queue-time vault-set freeze (M-05). Needed only for a set larger than the
+    ///         batch frozen within queue(); small sets are fully frozen at queue and skip this.
+    function freezeVaults(uint256 proposalId, uint256 batchSize) external {
+        ds.freezeVaults(proposalId, batchSize);
+    }
+
     function recordSnapshot(uint256 proposalId, uint256 batchSize) external {
         ds.recordSnapshot(proposalId, batchSize);
     }
