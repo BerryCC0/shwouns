@@ -208,7 +208,13 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
         string memory description,
         string memory updateMessage
     ) external {
-        ds.updateProposalBySigs(proposalId, proposerSignatures, targets, values, signatures, calldatas, description, updateMessage);
+        ds.updateProposalBySigs(
+            proposalId,
+            proposerSignatures,
+            ShwounsDAOSignatures.ProposalTxs(targets, values, signatures, calldatas),
+            description,
+            updateMessage
+        );
     }
 
     function proposalDigest(

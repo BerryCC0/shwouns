@@ -209,6 +209,32 @@ library ShwounsDAOProposals {
         p.creationBlock = block.number;
     }
 
+    /// @notice Cross-library entry for ShwounsDAOSignatures.proposeBySigs: validate actions (NO
+    ///         proposer-threshold check — proposeBySigs enforces threshold via combined signer
+    ///         power), bump the counter, write the proposal, and emit ProposalCreated. Mirrors the
+    ///         propose() tail.
+    /// @dev `public` so proposeBySigs reaches it as a DELEGATECALL in its own frame — the 9-arg
+    ///      ProposalCreated emit is too stack-heavy to inline into proposeBySigs under via_ir, but
+    ///      compiles cleanly here (same shape as propose). `msg.sender` is preserved across the
+    ///      delegatecall, so the emitted proposer is the original caller.
+    function createForSigners(
+        ShwounsDAOTypes.Storage storage ds,
+        address[] memory targets,
+        uint256[] memory values,
+        string[] memory signatures,
+        bytes[] memory calldatas,
+        string memory description
+    ) public returns (uint256 proposalId) {
+        _validateActionsAndThreshold_skip(ds, targets, values, signatures, calldatas);
+        ds.proposalCount++;
+        proposalId = ds.proposalCount;
+        _writeProposal(ds, proposalId, targets, values, signatures, calldatas);
+        ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
+        emit ProposalCreated(
+            proposalId, msg.sender, targets, values, signatures, calldatas, p.startBlock, p.endBlock, description
+        );
+    }
+
     // =========================================================================
     // Vote
     // =========================================================================

@@ -7,7 +7,13 @@ script = "script"
 solc = "0.8.19"
 optimizer = true
 optimizer_runs = 200
-via_ir = false
+# via_ir: required to fit ShwounsDAOLogic under EIP-170. After the A3/A4 surgical splits the facade
+# was still ~659 bytes over, and optimizer_runs alone bottomed out at ~207 over even at runs=1 — so
+# the facade genuinely needs IR codegen. via_ir does NOT change storage layout (the storage gate
+# re-verifies this). It hit a Yul stack-too-deep in the moved proposeBySigs/updateProposalBySigs,
+# resolved by extracting helpers there (behaviour + EIP-712 digest unchanged; digest-stability test
+# guards it).
+via_ir = true
 remappings = [
     "forge-std/=lib/forge-std/src/",
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",

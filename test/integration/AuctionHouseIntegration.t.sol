@@ -164,7 +164,9 @@ contract AuctionHouseIntegrationTest is Test {
         // First auction: setup minted Shwouns 0 (founder) and 1 (auction).
         // Run 9 more auctions to reach the next founder mint at Shwoun 10.
         for (uint256 i = 0; i < 9; i++) {
-            vm.warp(block.timestamp + AUCTION_DURATION + 1);
+            // Warp to the live auction's actual endTime (fresh external-call return) — under via_ir,
+            // block.timestamp is tx-invariant and would be hoisted out of this loop.
+            vm.warp(auctionHouse.auction().endTime + 1);
             auctionHouse.settleCurrentAndCreateNewAuction();
         }
         // After 9 more auctions, Shwoun 10 (founder) and Shwoun 11 (auction) should be minted.
@@ -242,7 +244,10 @@ contract AuctionHouseIntegrationTest is Test {
             auctionHouse.createBid{value: bidAmount}(a.shwounId);
             totalBids += bidAmount;
 
-            vm.warp(block.timestamp + AUCTION_DURATION + 1);
+            // Warp to this auction's actual endTime (a fresh external-call return) rather than
+            // block.timestamp + DURATION: under via_ir, block.timestamp is tx-invariant and gets
+            // hoisted out of the loop, so a relative warp would repeat the first target every pass.
+            vm.warp(a.endTime + 1);
             auctionHouse.settleCurrentAndCreateNewAuction();
         }
 

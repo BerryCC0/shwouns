@@ -68,6 +68,16 @@ library ShwounsDAOSignatures {
     error SignerCountMismatch();
     error ProposerAlreadyHasLiveProposal();
 
+    /// @dev Bundles a proposal's action arrays into one memory pointer. updateProposalBySigs takes
+    ///      this instead of four separate array params to keep its stack shallow under via_ir; the
+    ///      facade builds it from the individual arrays, so the external ABI is unchanged.
+    struct ProposalTxs {
+        address[] targets;
+        uint256[] values;
+        string[] signatures;
+        bytes[] calldatas;
+    }
+
     // =========================================================================
     // Signed proposals (proposeBySigs) — EIP-712 multi-Noun co-signing
     // =========================================================================
@@ -87,37 +97,27 @@ library ShwounsDAOSignatures {
         string memory description
     ) external returns (uint256 proposalId) {
         if (proposerSignatures.length == 0) revert SignersBelowThreshold();
-        ShwounsDAOProposals._validateActionsAndThreshold_skip(ds, targets, values, signatures, calldatas);
 
         // Create the proposal BEFORE verifying signatures. This makes signer de-duplication free:
         // a repeated signer's latestProposalIds already points at this just-created (Pending)
-        // proposal, so _enforceOneLiveProposalFor reverts. proposer = msg.sender (set by _writeProposal).
-        ds.proposalCount++;
-        proposalId = ds.proposalCount;
-        ShwounsDAOProposals._writeProposal(ds, proposalId, targets, values, signatures, calldatas);
+        // proposal, so _enforceOneLiveProposalFor reverts. proposer = msg.sender. createForSigners
+        // runs as a cross-library DELEGATECALL (own frame) — the 9-arg ProposalCreated emit won't
+        // inline into proposeBySigs under via_ir, but compiles cleanly there (mirrors propose()).
+        proposalId = ShwounsDAOProposals.createForSigners(ds, targets, values, signatures, calldatas, description);
 
-        (uint256 votes, address[] memory signers) = _verifySignersAndCountVotes(
+        // Verify sigs, enforce the combined-power threshold, and return the trimmed signer set.
+        address[] memory signers = _verifySignersAndCountVotes(
             ds, proposerSignatures, targets, values, signatures, calldatas, description, proposalId
         );
-        if (signers.length == 0) revert SignersBelowThreshold();
-        // Strictly greater than the threshold (Nouns parity), same as the normal propose() path.
-        if (votes <= ShwounsDAOProposals.bps2Uint(ds.proposalThresholdBPS, ds.shwouns.totalSupply())) {
-            revert SignersBelowThreshold();
-        }
-
         ds._proposals[proposalId].signers = signers;
-
-        ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
-        emit ProposalCreated(
-            proposalId, msg.sender, targets, values, signatures, calldatas, p.startBlock, p.endBlock, description
-        );
         emit ProposalCreatedWithSigners(proposalId, signers);
     }
 
     /// @dev Verify each signer's signature, enforce one-live-proposal per signer (which also
     ///      de-duplicates signers against the just-created proposal), count the votes of signers
-    ///      with voting power, then add the proposer (msg.sender) the same way. Returns the trimmed
-    ///      signer set and total backing votes.
+    ///      with voting power, then add the proposer (msg.sender) the same way. Enforces the
+    ///      combined-power threshold (folded in here so proposeBySigs carries no `votes` local —
+    ///      via_ir stack depth) and returns the trimmed signer set.
     function _verifySignersAndCountVotes(
         ShwounsDAOTypes.Storage storage ds,
         ShwounsDAOTypes.ProposerSignature[] memory proposerSignatures,
@@ -127,12 +127,13 @@ library ShwounsDAOSignatures {
         bytes[] memory calldatas,
         string memory description,
         uint256 proposalId
-    ) internal returns (uint256 votes, address[] memory signers) {
+    ) internal returns (address[] memory signers) {
         bytes memory encodeData =
             _calcProposalEncodeData(msg.sender, targets, values, signatures, calldatas, description);
 
         signers = new address[](proposerSignatures.length);
         uint256 numSigners = 0;
+        uint256 votes = 0;
         for (uint256 i = 0; i < proposerSignatures.length; i++) {
             _verifyProposalSignature(ds, PROPOSAL_TYPEHASH, encodeData, proposerSignatures[i]);
 
@@ -152,6 +153,12 @@ library ShwounsDAOSignatures {
         _enforceOneLiveProposalFor(ds, msg.sender);
         ds.latestProposalIds[msg.sender] = proposalId;
         votes += ds.shwouns.getPriorVotes(msg.sender, block.number - 1);
+
+        // Strictly greater than the threshold (Nouns parity), same as the normal propose() path.
+        if (numSigners == 0) revert SignersBelowThreshold();
+        if (votes <= ShwounsDAOProposals.bps2Uint(ds.proposalThresholdBPS, ds.shwouns.totalSupply())) {
+            revert SignersBelowThreshold();
+        }
     }
 
     function _enforceOneLiveProposalFor(ShwounsDAOTypes.Storage storage ds, address proposer) internal view {
@@ -247,18 +254,18 @@ library ShwounsDAOSignatures {
     /// @notice Edit a co-signed proposal during its Updatable window. The proposer submits and ALL
     ///         original signers must re-sign the update (same set, same order). Signatures bind the
     ///         proposalId via UPDATE_PROPOSAL_TYPEHASH.
+    /// @dev `txs` bundles the four action arrays into one memory pointer (the facade builds it) so
+    ///      this function stays under via_ir's stack limit. Behaviour + EIP-712 digest are identical
+    ///      to passing the arrays individually.
     function updateProposalBySigs(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
         ShwounsDAOTypes.ProposerSignature[] memory proposerSignatures,
-        address[] memory targets,
-        uint256[] memory values,
-        string[] memory signatures,
-        bytes[] memory calldatas,
+        ProposalTxs memory txs,
         string memory description,
         string memory updateMessage
     ) external {
-        ShwounsDAOProposals._validateActionsAndThreshold_skip(ds, targets, values, signatures, calldatas);
+        ShwounsDAOProposals._validateActionsAndThreshold_skip(ds, txs.targets, txs.values, txs.signatures, txs.calldatas);
         if (proposerSignatures.length == 0) revert SignersBelowThreshold();
 
         ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
@@ -270,7 +277,8 @@ library ShwounsDAOSignatures {
         if (proposerSignatures.length != signers.length) revert SignerCountMismatch();
 
         bytes memory encodeData = abi.encodePacked(
-            proposalId, _calcProposalEncodeData(msg.sender, targets, values, signatures, calldatas, description)
+            proposalId,
+            _calcProposalEncodeData(msg.sender, txs.targets, txs.values, txs.signatures, txs.calldatas, description)
         );
         for (uint256 i = 0; i < proposerSignatures.length; i++) {
             _verifyProposalSignature(ds, UPDATE_PROPOSAL_TYPEHASH, encodeData, proposerSignatures[i]);
@@ -278,11 +286,13 @@ library ShwounsDAOSignatures {
             if (signers[i] != proposerSignatures[i].signer) revert OnlyProposerCanEdit();
         }
 
-        p.targets = targets;
-        p.values = values;
-        p.signatures = signatures;
-        p.calldatas = calldatas;
-        emit ProposalUpdated(proposalId, msg.sender, targets, values, signatures, calldatas, description, updateMessage);
+        p.targets = txs.targets;
+        p.values = txs.values;
+        p.signatures = txs.signatures;
+        p.calldatas = txs.calldatas;
+        emit ProposalUpdated(
+            proposalId, msg.sender, txs.targets, txs.values, txs.signatures, txs.calldatas, description, updateMessage
+        );
     }
 
     // =========================================================================

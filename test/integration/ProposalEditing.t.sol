@@ -154,17 +154,23 @@ contract ProposalEditingTest is Test {
     }
 
     function test_lifecycle_updatableThenPendingThenActive() public {
-        uint256 created = block.number;
-        uint256 pid = _propose();
+        // Roll to a fixed base block and compute every target from that literal. (Capturing
+        // `block.number` into a local is unsafe under via_ir: it treats block.number as tx-invariant
+        // and may read it at an optimizer-chosen point — e.g. after a later vm.roll — rather than at
+        // the textual position. A literal base + fresh rolls avoids that; _propose() creates the
+        // proposal at `base` since the DAO reads block.number fresh.)
+        uint256 base = 1_000;
+        vm.roll(base);
+        uint256 pid = _propose(); // updatePeriodEnd = base + UPDATABLE, startBlock = +votingDelay(1)
         assertEq(uint256(_state(pid)), uint256(ShwounsDAOTypes.ProposalState.Updatable), "Updatable at creation");
 
-        vm.roll(created + UPDATABLE); // last block of the update window
+        vm.roll(base + UPDATABLE); // last block of the update window
         assertEq(uint256(_state(pid)), uint256(ShwounsDAOTypes.ProposalState.Updatable), "still Updatable");
 
-        vm.roll(created + UPDATABLE + 1); // startBlock = updatePeriodEnd + votingDelay(1)
+        vm.roll(base + UPDATABLE + 1); // startBlock = updatePeriodEnd + votingDelay(1)
         assertEq(uint256(_state(pid)), uint256(ShwounsDAOTypes.ProposalState.Pending), "Pending");
 
-        vm.roll(created + UPDATABLE + 2);
+        vm.roll(base + UPDATABLE + 2);
         assertEq(uint256(_state(pid)), uint256(ShwounsDAOTypes.ProposalState.Active), "Active after update window + delay");
     }
 
