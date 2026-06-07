@@ -16,6 +16,8 @@ import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils
 
 import { ShwounsDAOTypes, ShwounsDAOEvents, ShwounsDAOStorage, IShwounsTokenLike } from "./ShwounsDAOInterfaces.sol";
 import { ShwounsDAOProposals } from "./ShwounsDAOProposals.sol";
+import { ShwounsDAOSignatures } from "./ShwounsDAOSignatures.sol";
+import { ShwounsDAOQuorum } from "./ShwounsDAOQuorum.sol";
 import { IShwounsVaultRegistry } from "../vault/IShwounsVaultRegistry.sol";
 
 /// @notice Minimal interface to GR for the wiring this contract needs.
@@ -26,6 +28,8 @@ interface IGovernanceRewardsForDAO {
 
 contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, UUPSUpgradeable {
     using ShwounsDAOProposals for ShwounsDAOTypes.Storage;
+    using ShwounsDAOSignatures for ShwounsDAOTypes.Storage;
+    using ShwounsDAOQuorum for ShwounsDAOTypes.Storage;
 
     /// @notice GovernanceRewards reference (Phase 5). Settable once by admin, locked after.
     IGovernanceRewardsForDAO public governanceRewards;
@@ -114,7 +118,9 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
 
         // Seed the first dynamic-quorum checkpoint (bounds-checked). Legacy fixed-quorum fallback
         // tracks the seed's minimum (only ever used for a hypothetical pre-checkpoint proposal).
-        _setDynamicQuorumParams(
+        // Calls the library directly (not the onlyAdmin facade wrapper), so the bounds checks still
+        // run during init without the admin gate.
+        ds.setDynamicQuorumParams(
             quorumParams.minQuorumVotesBPS, quorumParams.maxQuorumVotesBPS, quorumParams.quorumCoefficient
         );
         ds.quorumVotesBPS = quorumParams.minQuorumVotesBPS;
@@ -389,6 +395,13 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
         return ds.proposalEscrowImplementation;
     }
 
+    /// @notice Whether the ProposalEscrow implementation has been set + permanently locked. Read by
+    ///         the Bootstrap finalize prechecks (the storage field exists in `ds` but had no facade
+    ///         getter).
+    function proposalEscrowImplementationLocked() external view returns (bool) {
+        return ds.proposalEscrowImplementationLocked;
+    }
+
     /// @notice The deterministic escrow address for a proposal (clone of the locked impl, CREATE2
     ///         salt = proposalId, deployer = this proxy). Well-defined before the escrow is deployed.
     function escrowAddressOf(uint256 proposalId) external view returns (address) {
@@ -579,93 +592,38 @@ contract ShwounsDAOLogic is ShwounsDAOStorage, ShwounsDAOEvents, Initializable, 
         emit NewVetoer(oldVetoer, address(0));
     }
 
-    // -- Dynamic quorum params --
+    // -- Dynamic quorum params — checkpoint-admin lives in ShwounsDAOQuorum (audit F1: shrink the
+    //    facade below EIP-170). These are thin onlyAdmin wrappers; the hot-path quorum COMPUTE
+    //    (quorumVotes / getDynamicQuorumParamsAt) stays in ShwounsDAOProposals (see below). --
 
     function setDynamicQuorumParams(
         uint16 newMinQuorumVotesBPS,
         uint16 newMaxQuorumVotesBPS,
         uint32 newQuorumCoefficient
-    ) public onlyAdmin {
-        _setDynamicQuorumParams(newMinQuorumVotesBPS, newMaxQuorumVotesBPS, newQuorumCoefficient);
+    ) external onlyAdmin {
+        ds.setDynamicQuorumParams(newMinQuorumVotesBPS, newMaxQuorumVotesBPS, newQuorumCoefficient);
     }
 
-    /// @dev Bounds-checked checkpoint write. Internal so initialize() can seed before `admin` is
-    ///      effectively the caller (avoids the onlyAdmin gate during construction).
-    function _setDynamicQuorumParams(
-        uint16 newMinQuorumVotesBPS,
-        uint16 newMaxQuorumVotesBPS,
-        uint32 newQuorumCoefficient
-    ) internal {
-        if (
-            newMinQuorumVotesBPS < MIN_QUORUM_VOTES_BPS_LOWER_BOUND ||
-            newMinQuorumVotesBPS > MIN_QUORUM_VOTES_BPS_UPPER_BOUND
-        ) revert InvalidMinQuorumVotesBPS();
-        if (newMaxQuorumVotesBPS > MAX_QUORUM_VOTES_BPS_UPPER_BOUND) revert InvalidMaxQuorumVotesBPS();
-        if (newMinQuorumVotesBPS > newMaxQuorumVotesBPS) revert MinQuorumBPSGreaterThanMaxQuorumBPS();
-
-        ShwounsDAOTypes.DynamicQuorumParams memory old = _latestDynamicQuorumParams();
-        _writeQuorumParamsCheckpoint(
-            ShwounsDAOTypes.DynamicQuorumParams({
-                minQuorumVotesBPS: newMinQuorumVotesBPS,
-                maxQuorumVotesBPS: newMaxQuorumVotesBPS,
-                quorumCoefficient: newQuorumCoefficient
-            })
-        );
-        emit MinQuorumVotesBPSSet(old.minQuorumVotesBPS, newMinQuorumVotesBPS);
-        emit MaxQuorumVotesBPSSet(old.maxQuorumVotesBPS, newMaxQuorumVotesBPS);
-        emit QuorumCoefficientSet(old.quorumCoefficient, newQuorumCoefficient);
+    function setMinQuorumVotesBPS(uint16 newMinQuorumVotesBPS) external onlyAdmin {
+        ds.setMinQuorumVotesBPS(newMinQuorumVotesBPS);
     }
 
-    function _latestDynamicQuorumParams()
-        internal
-        view
-        returns (ShwounsDAOTypes.DynamicQuorumParams memory)
-    {
-        uint256 len = ds.quorumParamsCheckpoints.length;
-        if (len == 0) return ShwounsDAOTypes.DynamicQuorumParams(0, 0, 0);
-        return ds.quorumParamsCheckpoints[len - 1].params;
+    function setMaxQuorumVotesBPS(uint16 newMaxQuorumVotesBPS) external onlyAdmin {
+        ds.setMaxQuorumVotesBPS(newMaxQuorumVotesBPS);
     }
 
-    // -- Individual dynamic-quorum setters (V4 parity; each writes a new checkpoint via the
-    //    bounds-checked combined setter, leaving the other two params unchanged) --
-
-    function setMinQuorumVotesBPS(uint16 newMinQuorumVotesBPS) external {
-        ShwounsDAOTypes.DynamicQuorumParams memory p = _latestDynamicQuorumParams();
-        setDynamicQuorumParams(newMinQuorumVotesBPS, p.maxQuorumVotesBPS, p.quorumCoefficient);
-    }
-
-    function setMaxQuorumVotesBPS(uint16 newMaxQuorumVotesBPS) external {
-        ShwounsDAOTypes.DynamicQuorumParams memory p = _latestDynamicQuorumParams();
-        setDynamicQuorumParams(p.minQuorumVotesBPS, newMaxQuorumVotesBPS, p.quorumCoefficient);
-    }
-
-    function setQuorumCoefficient(uint32 newQuorumCoefficient) external {
-        ShwounsDAOTypes.DynamicQuorumParams memory p = _latestDynamicQuorumParams();
-        setDynamicQuorumParams(p.minQuorumVotesBPS, p.maxQuorumVotesBPS, newQuorumCoefficient);
+    function setQuorumCoefficient(uint32 newQuorumCoefficient) external onlyAdmin {
+        ds.setQuorumCoefficient(newQuorumCoefficient);
     }
 
     /// @notice Current minimum quorum in absolute votes (minQuorumVotesBPS of total supply).
     function minQuorumVotes() external view returns (uint256) {
-        return (ds.shwouns.totalSupply() * _latestDynamicQuorumParams().minQuorumVotesBPS) / 10000;
+        return ds.minQuorumVotes();
     }
 
     /// @notice Current maximum quorum in absolute votes (maxQuorumVotesBPS of total supply).
     function maxQuorumVotes() external view returns (uint256) {
-        return (ds.shwouns.totalSupply() * _latestDynamicQuorumParams().maxQuorumVotesBPS) / 10000;
-    }
-
-    function _writeQuorumParamsCheckpoint(ShwounsDAOTypes.DynamicQuorumParams memory params) internal {
-        uint256 len = ds.quorumParamsCheckpoints.length;
-        if (len > 0 && ds.quorumParamsCheckpoints[len - 1].fromBlock == block.number) {
-            ds.quorumParamsCheckpoints[len - 1].params = params;
-        } else {
-            ds.quorumParamsCheckpoints.push(
-                ShwounsDAOTypes.DynamicQuorumParamsCheckpoint({
-                    fromBlock: uint32(block.number),
-                    params: params
-                })
-            );
-        }
+        return ds.maxQuorumVotes();
     }
 
     /// @notice The quorum (in votes) required for a proposal, accounting for dynamic quorum and

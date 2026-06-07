@@ -12,6 +12,7 @@ import {ShwounsVaultRegistry} from "../../src/vault/ShwounsVaultRegistry.sol";
 import {ShwounsDAOLogic} from "../../src/governance/ShwounsDAOLogic.sol";
 import {ShwounsDAOTypes, IShwounsTokenLike} from "../../src/governance/ShwounsDAOInterfaces.sol";
 import {ShwounsDAOProposals} from "../../src/governance/ShwounsDAOProposals.sol";
+import {ShwounsDAOSignatures} from "../../src/governance/ShwounsDAOSignatures.sol";
 import {ProposalEscrow} from "../../src/governance/ProposalEscrow.sol";
 
 import {ERC6551Registry} from "../mocks/ERC6551Registry.sol";
@@ -698,7 +699,7 @@ contract DAOSignedProposalsTest is Test {
 
         // totalSupply = 10 (founder 0 + auction 1-3 + 6 filler). threshold = bps2Uint(1000, 10) = 1.
         // Single signer has 1 vote; 1 <= 1 (Nouns semantics) → must revert.
-        vm.expectRevert(ShwounsDAOProposals.SignersBelowThreshold.selector);
+        vm.expectRevert(ShwounsDAOSignatures.SignersBelowThreshold.selector);
         dao.proposeBySigs(proposerSigs, targets, values, sigs, cd, "lone signer");
     }
 
@@ -728,7 +729,7 @@ contract DAOSignedProposalsTest is Test {
             sig: bobSig, signer: sigBob, expirationTimestamp: expiry
         });
 
-        vm.expectRevert(ShwounsDAOProposals.SigCancelled.selector);
+        vm.expectRevert(ShwounsDAOSignatures.SigCancelled.selector);
         dao.proposeBySigs(proposerSigs, targets, values, sigs, cd, "cancel test");
     }
 
@@ -751,7 +752,7 @@ contract DAOSignedProposalsTest is Test {
             sig: aliceSig, signer: sigAlice, expirationTimestamp: expiry
         });
 
-        vm.expectRevert(ShwounsDAOProposals.SigExpired.selector);
+        vm.expectRevert(ShwounsDAOSignatures.SigExpired.selector);
         dao.proposeBySigs(proposerSigs, targets, values, sigs, cd, "expired");
     }
 

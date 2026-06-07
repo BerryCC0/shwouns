@@ -177,6 +177,9 @@ library ShwounsDAOProposals {
         }
     }
 
+    /// @dev `public` so the ShwounsDAOSignatures library can reach it cross-library (A3 split).
+    ///      In-library callers (propose) still reach it as a same-library JUMP, so the hot propose
+    ///      path is unaffected; only the cold proposeBySigs path pays the delegatecall hop.
     function _writeProposal(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -184,7 +187,7 @@ library ShwounsDAOProposals {
         uint256[] memory values,
         string[] memory signatures,
         bytes[] memory calldatas
-    ) internal {
+    ) public {
         uint256 totalSupply = ds.shwouns.totalSupply();
         ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
         p.id = proposalId;
@@ -939,266 +942,31 @@ library ShwounsDAOProposals {
     }
 
     // =========================================================================
-    // Signed proposals (proposeBySigs) — EIP-712 multi-Noun co-signing
+    // EIP-712 ballot constants (castVoteBySig). The proposal/update typehashes + the signed-proposals
+    // and proposal-editing family moved to ShwounsDAOSignatures (A3 — EIP-170 split).
     // =========================================================================
 
-    /// @dev EIP-712 typehashes. Pinned at compile time.
+    /// @dev EIP-712 typehashes. Pinned at compile time. DOMAIN_TYPEHASH/DOMAIN_NAME_HASH back
+    ///      _domainSeparator (shared with ShwounsDAOSignatures); BALLOT_TYPEHASH backs castVoteBySig.
     bytes32 internal constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)");
-    bytes32 internal constant PROPOSAL_TYPEHASH = keccak256(
-        "Proposal(address proposer,address[] targets,uint256[] values,string[] signatures,bytes[] calldatas,string description,uint256 expiry)"
-    );
     bytes32 internal constant BALLOT_TYPEHASH = keccak256("Ballot(uint256 proposalId,uint8 support)");
-    bytes32 internal constant UPDATE_PROPOSAL_TYPEHASH = keccak256(
-        "UpdateProposal(uint256 proposalId,address proposer,address[] targets,uint256[] values,string[] signatures,bytes[] calldatas,string description,uint256 expiry)"
-    );
     bytes32 internal constant DOMAIN_NAME_HASH = keccak256("ShwounsDAO");
 
-    event SignatureCancelled(address indexed signer, bytes sig);
-    event ProposalCreatedWithSigners(uint256 indexed id, address[] signers);
-    event ProposalUpdated(
-        uint256 indexed id, address indexed proposer, address[] targets, uint256[] values,
-        string[] signatures, bytes[] calldatas, string description, string updateMessage
-    );
-    event ProposalTransactionsUpdated(
-        uint256 indexed id, address indexed proposer, address[] targets, uint256[] values,
-        string[] signatures, bytes[] calldatas, string updateMessage
-    );
-    event ProposalDescriptionUpdated(
-        uint256 indexed id, address indexed proposer, string description, string updateMessage
-    );
-
-    error SigExpired();
-    error SigCancelled();
+    /// @dev Used by castVoteBySig (ecrecover returning address(0)). The proposal-signature errors
+    ///      live in ShwounsDAOSignatures.
     error SigInvalid();
-    error SignersBelowThreshold();
-    error CanOnlyEditUpdatableProposals();
-    error OnlyProposerCanEdit();
-    error ProposerCannotUpdateProposalWithSigners();
-    error SignerCountMismatch();
-
-    /// @notice Create a proposal co-signed by multiple Shwoun holders. `msg.sender` is the
-    ///         proposer and contributes its own votes; the signers' combined voting power plus the
-    ///         proposer's must STRICTLY exceed the proposal threshold. Each signature binds the
-    ///         proposer, the proposal actions, and that signer's own expiry, and is verified via
-    ///         ERC-1271 (so smart-contract wallets can co-sign). Mirrors NounsDAOProposals.
-    function proposeBySigs(
-        ShwounsDAOTypes.Storage storage ds,
-        ShwounsDAOTypes.ProposerSignature[] memory proposerSignatures,
-        address[] memory targets,
-        uint256[] memory values,
-        string[] memory signatures,
-        bytes[] memory calldatas,
-        string memory description
-    ) external returns (uint256 proposalId) {
-        if (proposerSignatures.length == 0) revert SignersBelowThreshold();
-        _validateActionsAndThreshold_skip(ds, targets, values, signatures, calldatas);
-
-        // Create the proposal BEFORE verifying signatures. This makes signer de-duplication free:
-        // a repeated signer's latestProposalIds already points at this just-created (Pending)
-        // proposal, so _enforceOneLiveProposalFor reverts. proposer = msg.sender (set by _writeProposal).
-        ds.proposalCount++;
-        proposalId = ds.proposalCount;
-        _writeProposal(ds, proposalId, targets, values, signatures, calldatas);
-
-        (uint256 votes, address[] memory signers) = _verifySignersAndCountVotes(
-            ds, proposerSignatures, targets, values, signatures, calldatas, description, proposalId
-        );
-        if (signers.length == 0) revert SignersBelowThreshold();
-        // Strictly greater than the threshold (Nouns parity), same as the normal propose() path.
-        if (votes <= bps2Uint(ds.proposalThresholdBPS, ds.shwouns.totalSupply())) {
-            revert SignersBelowThreshold();
-        }
-
-        ds._proposals[proposalId].signers = signers;
-
-        ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
-        emit ProposalCreated(
-            proposalId, msg.sender, targets, values, signatures, calldatas, p.startBlock, p.endBlock, description
-        );
-        emit ProposalCreatedWithSigners(proposalId, signers);
-    }
-
-    /// @dev Verify each signer's signature, enforce one-live-proposal per signer (which also
-    ///      de-duplicates signers against the just-created proposal), count the votes of signers
-    ///      with voting power, then add the proposer (msg.sender) the same way. Returns the trimmed
-    ///      signer set and total backing votes.
-    function _verifySignersAndCountVotes(
-        ShwounsDAOTypes.Storage storage ds,
-        ShwounsDAOTypes.ProposerSignature[] memory proposerSignatures,
-        address[] memory targets,
-        uint256[] memory values,
-        string[] memory signatures,
-        bytes[] memory calldatas,
-        string memory description,
-        uint256 proposalId
-    ) internal returns (uint256 votes, address[] memory signers) {
-        bytes memory encodeData =
-            _calcProposalEncodeData(msg.sender, targets, values, signatures, calldatas, description);
-
-        signers = new address[](proposerSignatures.length);
-        uint256 numSigners = 0;
-        for (uint256 i = 0; i < proposerSignatures.length; i++) {
-            _verifyProposalSignature(ds, PROPOSAL_TYPEHASH, encodeData, proposerSignatures[i]);
-
-            address signer = proposerSignatures[i].signer;
-            _enforceOneLiveProposalFor(ds, signer); // checkNoActiveProp + signer de-dup
-
-            uint256 signerVotes = ds.shwouns.getPriorVotes(signer, block.number - 1);
-            if (signerVotes == 0) continue;
-
-            signers[numSigners++] = signer;
-            ds.latestProposalIds[signer] = proposalId;
-            votes += signerVotes;
-        }
-        // Trim the signer array to the entries actually used.
-        assembly { mstore(signers, numSigners) }
-
-        _enforceOneLiveProposalFor(ds, msg.sender);
-        ds.latestProposalIds[msg.sender] = proposalId;
-        votes += ds.shwouns.getPriorVotes(msg.sender, block.number - 1);
-    }
-
-    function _enforceOneLiveProposalFor(ShwounsDAOTypes.Storage storage ds, address proposer) internal view {
-        if (ds.latestProposalIds[proposer] == 0) return;
-        ShwounsDAOTypes.ProposalState s = state(ds, ds.latestProposalIds[proposer]);
-        if (s == ShwounsDAOTypes.ProposalState.Active ||
-            s == ShwounsDAOTypes.ProposalState.Pending ||
-            s == ShwounsDAOTypes.ProposalState.ObjectionPeriod ||
-            s == ShwounsDAOTypes.ProposalState.Updatable) {
-            revert ProposerAlreadyHasLiveProposal();
-        }
-    }
-
-    /// @notice Allow a signer to invalidate a specific signature. After cancellation,
-    ///         proposeBySigs will reject that sig.
-    function cancelSig(ShwounsDAOTypes.Storage storage ds, bytes calldata sig) external {
-        ds.cancelledSigs[msg.sender][keccak256(sig)] = true;
-        emit SignatureCancelled(msg.sender, sig);
-    }
-
-    // =========================================================================
-    // Proposal editing (Updatable window) — Nouns parity
-    // =========================================================================
-
-    /// @dev A proposal may be edited only while Updatable, only by its proposer, and (for the
-    ///      non-sig path) only if it has no co-signers (those must use updateProposalBySigs).
-    function _checkProposalUpdatable(
-        ShwounsDAOTypes.Storage storage ds,
-        uint256 proposalId,
-        ShwounsDAOTypes.Proposal storage proposal
-    ) internal view {
-        if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Updatable)
-            revert CanOnlyEditUpdatableProposals();
-        if (msg.sender != proposal.proposer) revert OnlyProposerCanEdit();
-        if (proposal.signers.length > 0) revert ProposerCannotUpdateProposalWithSigners();
-    }
-
-    function updateProposal(
-        ShwounsDAOTypes.Storage storage ds,
-        uint256 proposalId,
-        address[] memory targets,
-        uint256[] memory values,
-        string[] memory signatures,
-        bytes[] memory calldatas,
-        string memory description,
-        string memory updateMessage
-    ) external {
-        _updateProposalTransactionsInternal(ds, proposalId, targets, values, signatures, calldatas);
-        emit ProposalUpdated(proposalId, msg.sender, targets, values, signatures, calldatas, description, updateMessage);
-    }
-
-    function updateProposalTransactions(
-        ShwounsDAOTypes.Storage storage ds,
-        uint256 proposalId,
-        address[] memory targets,
-        uint256[] memory values,
-        string[] memory signatures,
-        bytes[] memory calldatas,
-        string memory updateMessage
-    ) external {
-        _updateProposalTransactionsInternal(ds, proposalId, targets, values, signatures, calldatas);
-        emit ProposalTransactionsUpdated(proposalId, msg.sender, targets, values, signatures, calldatas, updateMessage);
-    }
-
-    function _updateProposalTransactionsInternal(
-        ShwounsDAOTypes.Storage storage ds,
-        uint256 proposalId,
-        address[] memory targets,
-        uint256[] memory values,
-        string[] memory signatures,
-        bytes[] memory calldatas
-    ) internal {
-        _validateActionsAndThreshold_skip(ds, targets, values, signatures, calldatas);
-        ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
-        _checkProposalUpdatable(ds, proposalId, p);
-        p.targets = targets;
-        p.values = values;
-        p.signatures = signatures;
-        p.calldatas = calldatas;
-    }
-
-    function updateProposalDescription(
-        ShwounsDAOTypes.Storage storage ds,
-        uint256 proposalId,
-        string calldata description,
-        string calldata updateMessage
-    ) external {
-        ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
-        _checkProposalUpdatable(ds, proposalId, p);
-        emit ProposalDescriptionUpdated(proposalId, msg.sender, description, updateMessage);
-    }
-
-    /// @notice Edit a co-signed proposal during its Updatable window. The proposer submits and ALL
-    ///         original signers must re-sign the update (same set, same order). Signatures bind the
-    ///         proposalId via UPDATE_PROPOSAL_TYPEHASH.
-    function updateProposalBySigs(
-        ShwounsDAOTypes.Storage storage ds,
-        uint256 proposalId,
-        ShwounsDAOTypes.ProposerSignature[] memory proposerSignatures,
-        address[] memory targets,
-        uint256[] memory values,
-        string[] memory signatures,
-        bytes[] memory calldatas,
-        string memory description,
-        string memory updateMessage
-    ) external {
-        _validateActionsAndThreshold_skip(ds, targets, values, signatures, calldatas);
-        if (proposerSignatures.length == 0) revert SignersBelowThreshold();
-
-        ShwounsDAOTypes.Proposal storage p = ds._proposals[proposalId];
-        if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Updatable)
-            revert CanOnlyEditUpdatableProposals();
-        if (msg.sender != p.proposer) revert OnlyProposerCanEdit();
-
-        address[] memory signers = p.signers;
-        if (proposerSignatures.length != signers.length) revert SignerCountMismatch();
-
-        bytes memory encodeData = abi.encodePacked(
-            proposalId, _calcProposalEncodeData(msg.sender, targets, values, signatures, calldatas, description)
-        );
-        for (uint256 i = 0; i < proposerSignatures.length; i++) {
-            _verifyProposalSignature(ds, UPDATE_PROPOSAL_TYPEHASH, encodeData, proposerSignatures[i]);
-            // Assume the same signer set in the same order (avoids an O(n^2) membership search).
-            if (signers[i] != proposerSignatures[i].signer) revert OnlyProposerCanEdit();
-        }
-
-        p.targets = targets;
-        p.values = values;
-        p.signatures = signatures;
-        p.calldatas = calldatas;
-        emit ProposalUpdated(proposalId, msg.sender, targets, values, signatures, calldatas, description, updateMessage);
-    }
 
     /// @dev Same as _validateActionsAndThreshold but without the proposer-threshold check
     ///      (proposeBySigs enforces threshold differently — via combined signer power).
+    /// @dev `public` so ShwounsDAOSignatures can reach it cross-library (A3 split).
     function _validateActionsAndThreshold_skip(
         ShwounsDAOTypes.Storage storage,
         address[] memory targets,
         uint256[] memory values,
         string[] memory signatures,
         bytes[] memory calldatas
-    ) internal pure {
+    ) public pure {
         if (targets.length != values.length ||
             targets.length != signatures.length ||
             targets.length != calldatas.length) revert ActionsArrayLengthMismatch();
@@ -1206,91 +974,10 @@ library ShwounsDAOProposals {
         if (targets.length > 10) revert TooManyActions();
     }
 
-    function _domainSeparator(ShwounsDAOTypes.Storage storage) internal view returns (bytes32) {
+    /// @dev `public` so ShwounsDAOSignatures can reach it cross-library (A3 split). castVoteBySig
+    ///      (this library) reaches it as a same-library JUMP, so the ballot path is unaffected.
+    function _domainSeparator(ShwounsDAOTypes.Storage storage) public view returns (bytes32) {
         return keccak256(abi.encode(DOMAIN_TYPEHASH, DOMAIN_NAME_HASH, block.chainid, address(this)));
-    }
-
-    /// @dev EIP-712 proposal encoding (Nouns parity). Binds the PROPOSER plus the proposal
-    ///      actions; the per-signer expiry is folded in by _sigDigest. Earlier this hard-coded
-    ///      proposer = address(0) and expiry = 0, so neither was bound — a relayer could swap the
-    ///      submitter or the expiry while keeping a valid signature.
-    function _calcProposalEncodeData(
-        address proposer,
-        address[] memory targets,
-        uint256[] memory values,
-        string[] memory signatures,
-        bytes[] memory calldatas,
-        string memory description
-    ) internal pure returns (bytes memory) {
-        return abi.encode(
-            proposer,
-            keccak256(abi.encodePacked(targets)),
-            keccak256(abi.encodePacked(values)),
-            _hashStringArray(signatures),
-            _hashBytesArray(calldatas),
-            keccak256(bytes(description))
-        );
-    }
-
-    /// @dev The typed-data digest a given signer signs: binds the proposal encoding AND that
-    ///      signer's own expiry, so the expiry is cryptographically committed (not malleable).
-    function _sigDigest(
-        ShwounsDAOTypes.Storage storage ds,
-        bytes32 typehash,
-        bytes memory encodeData,
-        uint256 expirationTimestamp
-    ) internal view returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encodePacked(typehash, encodeData, expirationTimestamp));
-        return ECDSA.toTypedDataHash(_domainSeparator(ds), structHash);
-    }
-
-    /// @dev Verify one signer's signature: not cancelled, valid (ERC-1271 via SignatureChecker so
-    ///      contract wallets can co-sign), and not expired. `typehash` selects propose vs update.
-    function _verifyProposalSignature(
-        ShwounsDAOTypes.Storage storage ds,
-        bytes32 typehash,
-        bytes memory encodeData,
-        ShwounsDAOTypes.ProposerSignature memory ps
-    ) internal view {
-        if (ds.cancelledSigs[ps.signer][keccak256(ps.sig)]) revert SigCancelled();
-        bytes32 digest = _sigDigest(ds, typehash, encodeData, ps.expirationTimestamp);
-        if (!SignatureChecker.isValidSignatureNow(ps.signer, digest, ps.sig)) revert SigInvalid();
-        if (block.timestamp > ps.expirationTimestamp) revert SigExpired();
-    }
-
-    function _hashStringArray(string[] memory arr) internal pure returns (bytes32) {
-        bytes32[] memory hashes = new bytes32[](arr.length);
-        for (uint256 i = 0; i < arr.length; i++) {
-            hashes[i] = keccak256(bytes(arr[i]));
-        }
-        return keccak256(abi.encodePacked(hashes));
-    }
-
-    function _hashBytesArray(bytes[] memory arr) internal pure returns (bytes32) {
-        bytes32[] memory hashes = new bytes32[](arr.length);
-        for (uint256 i = 0; i < arr.length; i++) {
-            hashes[i] = keccak256(arr[i]);
-        }
-        return keccak256(abi.encodePacked(hashes));
-    }
-
-    /// @notice Compute the EIP-712 digest a signer signs for a proposal. Off-chain UIs call this
-    ///         to build the signing payload. ABI CHANGED vs the earlier unsound version: it now
-    ///         takes the `proposer` (the address that will submit proposeBySigs) and the signer's
-    ///         `expirationTimestamp`, both of which are bound into the digest.
-    function proposalDigest(
-        ShwounsDAOTypes.Storage storage ds,
-        address proposer,
-        address[] memory targets,
-        uint256[] memory values,
-        string[] memory signatures,
-        bytes[] memory calldatas,
-        string memory description,
-        uint256 expirationTimestamp
-    ) external view returns (bytes32) {
-        bytes memory encodeData =
-            _calcProposalEncodeData(proposer, targets, values, signatures, calldatas, description);
-        return _sigDigest(ds, PROPOSAL_TYPEHASH, encodeData, expirationTimestamp);
     }
 
     // =========================================================================
@@ -1535,7 +1222,8 @@ library ShwounsDAOProposals {
     // Helpers
     // =========================================================================
 
-    function bps2Uint(uint256 bps, uint256 number) internal pure returns (uint256) {
+    /// @dev `public` so ShwounsDAOSignatures can reach it cross-library (A3 split).
+    function bps2Uint(uint256 bps, uint256 number) public pure returns (uint256) {
         return (number * bps) / 10000;
     }
 }

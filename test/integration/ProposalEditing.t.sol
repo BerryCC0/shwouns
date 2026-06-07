@@ -10,6 +10,7 @@ import {ShwounsVault} from "../../src/vault/ShwounsVault.sol";
 import {ShwounsVaultRegistry} from "../../src/vault/ShwounsVaultRegistry.sol";
 import {ShwounsDAOLogic} from "../../src/governance/ShwounsDAOLogic.sol";
 import {ShwounsDAOProposals} from "../../src/governance/ShwounsDAOProposals.sol";
+import {ShwounsDAOSignatures} from "../../src/governance/ShwounsDAOSignatures.sol";
 import {ShwounsDAOTypes, IShwounsTokenLike} from "../../src/governance/ShwounsDAOInterfaces.sol";
 import {ProposalEscrow} from "../../src/governance/ProposalEscrow.sol";
 
@@ -186,7 +187,7 @@ contract ProposalEditingTest is Test {
         vm.roll(created + UPDATABLE + 1); // now Pending — window closed
         (address[] memory t, uint256[] memory v, string[] memory s, bytes[] memory c) = _oneAction(makeAddr("x"), 0);
         vm.prank(proposer);
-        vm.expectRevert(ShwounsDAOProposals.CanOnlyEditUpdatableProposals.selector);
+        vm.expectRevert(ShwounsDAOSignatures.CanOnlyEditUpdatableProposals.selector);
         dao.updateProposal(pid, t, v, s, c, "late", "too late");
     }
 
@@ -194,7 +195,7 @@ contract ProposalEditingTest is Test {
         uint256 pid = _propose();
         (address[] memory t, uint256[] memory v, string[] memory s, bytes[] memory c) = _oneAction(makeAddr("x"), 0);
         vm.prank(other);
-        vm.expectRevert(ShwounsDAOProposals.OnlyProposerCanEdit.selector);
+        vm.expectRevert(ShwounsDAOSignatures.OnlyProposerCanEdit.selector);
         dao.updateProposal(pid, t, v, s, c, "hijack", "not mine");
     }
 
