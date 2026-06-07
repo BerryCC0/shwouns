@@ -308,7 +308,7 @@ contract DAORefundStuckTest is DAOTestBase {
         _deploy(1, 7200);
     }
 
-    function test_refundStuckProposal_returnsFundsToCurrentOwners() public {
+    function test_refundStuckProposal_returnsFundsToVaults() public {
         // Create a proposal targeting a contract that will revert in finalize
         RevertingTarget bad = new RevertingTarget();
         address[] memory targets = new address[](1);
@@ -343,18 +343,19 @@ contract DAORefundStuckTest is DAOTestBase {
 
         assertEq(dao.escrowAddressOf(pid).balance, 5 ether, "escrow holds the collected 5 ETH");
 
-        // Refund — by actual contribution, returns ETH to current owners (paged batch)
-        uint256 aliceBefore = alice.balance;
-        uint256 bobBefore = bob.balance;
-        uint256 carolBefore = carol.balance;
+        // Refund — by actual contribution, returns ETH to the contributing VAULTS (F4), not the
+        // owners directly. The owner controls the vault and can withdraw() the restored funds.
+        uint256 aliceVaultBefore = address(aliceVault).balance;
+        uint256 bobVaultBefore = address(bobVault).balance;
+        uint256 carolVaultBefore = address(carolVault).balance;
 
         dao.refundStuckProposal(pid, 100);
 
         // All three contributed their full share (no drain), so actual == snapshot share:
-        // alice 5*3/10=1.5, bob 5*5/10=2.5, carol 5*2/10=1.0
-        assertEq(alice.balance - aliceBefore, 1.5 ether);
-        assertEq(bob.balance - bobBefore, 2.5 ether);
-        assertEq(carol.balance - carolBefore, 1.0 ether);
+        // alice 5*3/10=1.5, bob 5*5/10=2.5, carol 5*2/10=1.0 — restored to each vault.
+        assertEq(address(aliceVault).balance - aliceVaultBefore, 1.5 ether);
+        assertEq(address(bobVault).balance - bobVaultBefore, 2.5 ether);
+        assertEq(address(carolVault).balance - carolVaultBefore, 1.0 ether);
         assertEq(dao.escrowAddressOf(pid).balance, 0, "escrow drained after refund");
     }
 }
@@ -365,6 +366,14 @@ contract RevertingTarget {
     }
 
     receive() external payable {}
+}
+
+/// @notice A Noun holder that rejects all ETH. Used to prove F4: a hostile current owner can no
+///         longer brick refunds, because refunds now go to the vault (not the owner).
+contract RejectsETH {
+    receive() external payable {
+        revert("RejectsETH: no ETH");
+    }
 }
 
 // =============================================================================
@@ -918,19 +927,52 @@ contract DAORecoveryTest is DAOTestBase {
         dao.veto(pid); // this contract is the vetoer
         assertEq(uint256(dao.state(pid)), uint256(ShwounsDAOTypes.ProposalState.Vetoed));
 
-        uint256 a = alice.balance;
-        uint256 b = bob.balance;
-        uint256 cb = carol.balance;
+        uint256 a = address(aliceVault).balance;
+        uint256 b = address(bobVault).balance;
+        uint256 cb = address(carolVault).balance;
         dao.refund(pid, 100); // permissionless
         assertEq(dao.escrowAddressOf(pid).balance, 0, "escrow fully refunded");
-        // shares of 6 from total 10: alice 1.8, bob 3.0, carol 1.2
-        assertEq(alice.balance - a, 1.8 ether);
-        assertEq(bob.balance - b, 3 ether);
-        assertEq(carol.balance - cb, 1.2 ether);
+        // shares of 6 from total 10, returned to each contributing vault (F4):
+        // alice 1.8, bob 3.0, carol 1.2
+        assertEq(address(aliceVault).balance - a, 1.8 ether);
+        assertEq(address(bobVault).balance - b, 3 ether);
+        assertEq(address(carolVault).balance - cb, 1.2 ether);
 
         // No double refund.
         vm.expectRevert(ShwounsDAOProposals.AlreadyRefunded.selector);
         dao.refund(pid, 100);
+    }
+
+    /// F4 (refund DoS, FIXED — regression). A contributor whose Noun is transferred to a contract
+    /// that REJECTS ETH no longer bricks the refund. Pre-F4, refunds PUSHED ETH to the current Noun
+    /// owner, so one hostile owner reverted the paged refund and permanently blocked the terminal
+    /// `refunded` flag (and thus rescueFromEscrow) for ALL contributors. Post-F4, the refund returns
+    /// to the contributing VAULT (whose receive() never reverts), so it completes regardless.
+    function test_f4_refundToVault_notBrickedByHostileNounOwner() public {
+        uint256 pid = _passAndCollect(6 ether);
+        address escrow = dao.escrowAddressOf(pid);
+        assertEq(escrow.balance, 6 ether, "escrow funded");
+
+        // Transfer alice's Noun to a contract that rejects ETH (transferFrom: no onERC721Received
+        // needed). The vault ADDRESS is unchanged (bound to the tokenId); only its controller moves.
+        RejectsETH hostile = new RejectsETH();
+        vm.prank(alice);
+        token.transferFrom(alice, address(hostile), aliceNoun);
+        assertEq(registry.vaultOf(aliceNoun), address(aliceVault), "vault address unchanged by transfer");
+
+        dao.veto(pid); // funded -> refundable; this contract is the vetoer
+        assertEq(uint256(dao.state(pid)), uint256(ShwounsDAOTypes.ProposalState.Vetoed));
+
+        uint256 aliceVaultBefore = address(aliceVault).balance;
+        // Completes in one page despite the hostile owner — would have reverted pre-F4.
+        dao.refund(pid, 100);
+        assertEq(escrow.balance, 0, "escrow fully refunded despite hostile Noun owner");
+        // alice's share (6*3/10) lands in her VAULT, not pushed to the rejecting owner.
+        assertEq(address(aliceVault).balance - aliceVaultBefore, 1.8 ether, "alice's share returned to her vault");
+
+        // The terminal `refunded` flag is now set, so the permissionless residual rescue is reachable
+        // (no residual remains, so this is a no-op sweep — it must NOT revert NotTerminal).
+        dao.rescueFromEscrow(pid, ShwounsDAOProposals.AssetKind.ETH, address(0), 0, 0);
     }
 
     /// The refund pages across bounded calls; the cursor advances one vault per batch.

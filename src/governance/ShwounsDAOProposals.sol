@@ -1018,11 +1018,11 @@ library ShwounsDAOProposals {
 
     /// @notice Permissionless contribution refund for a funded but DEAD proposal — Canceled or
     ///         Vetoed (H-01: cancel/veto are never blocked after funds move; the funds route here).
-    ///         Pages over snapshotted vaults, returning each vault's ACTUAL contribution (M-03) to
-    ///         its current owner from the escrow. Permissionless is safe — destinations are derived
-    ///         from on-chain ownership, never the caller. (A Collected proposal whose finalize is
-    ///         stuck uses the admin refundStuckProposal instead, so a live proposal can't be
-    ///         permissionlessly forced into refund.)
+    ///         Pages over snapshotted vaults, returning each vault's ACTUAL contribution (M-03) back
+    ///         to THAT vault from the escrow (F4 — the vault's receive() never reverts). Permissionless
+    ///         is safe — destinations are the vaults themselves (from the registry), never the caller.
+    ///         (A Collected proposal whose finalize is stuck uses the admin refundStuckProposal
+    ///         instead, so a live proposal can't be permissionlessly forced into refund.)
     function refund(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -1051,8 +1051,8 @@ library ShwounsDAOProposals {
     }
 
     /// @dev Paged refund engine. Returns each snapshotted vault's ACTUAL pulled amount, for every
-    ///      recorded asset (ss.assets — never a caller-supplied list, so no asset is omitted), to
-    ///      its current owner. The cursor advances only after a page's transfers all succeed (a
+    ///      recorded asset (ss.assets — never a caller-supplied list, so no asset is omitted), back to
+    ///      that vault. The cursor advances only after a page's transfers all succeed (a
     ///      reverted page rolls back atomically and does not advance), and `refunded` is committed
     ///      only after the FINAL page — so rescue's terminal gate opens only once every contribution
     ///      has been returned.
@@ -1084,9 +1084,17 @@ library ShwounsDAOProposals {
         }
     }
 
-    /// @dev Refund one vault's actual contribution across every recorded asset, to its current
-    ///      owner, out of the escrow. Zeroes each pulled entry before transfer so a re-page cannot
-    ///      double-refund (and a revert rolls the zeroing back atomically).
+    /// @dev Refund one vault's actual contribution across every recorded asset, back to THAT VAULT
+    ///      (not the current Noun owner), out of the escrow. Zeroes each pulled entry before transfer
+    ///      so a re-page cannot double-refund (and a revert rolls the zeroing back atomically).
+    /// @dev F4 (refund DoS): the contribution came FROM the vault, so it returns TO the vault. The
+    ///      vault's receive() never reverts (ShwounsVault), so no recipient can brick the paged refund
+    ///      or the terminal `refunded` flag (which gates rescueFromEscrow) — unlike pushing ETH to the
+    ///      current Noun owner, who could be a contract that rejects ETH. The owner controls the vault
+    ///      and can withdraw() the returned funds; a Noun that changed hands since the contribution no
+    ///      longer mis-pays a new owner. (Benign: an ETH refund re-triggers the vault's markActive →
+    ///      re-adds to the append-only active set, a no-op if present; recordSnapshot skips zero
+    ///      balances. ERC-20 refunds don't hit receive(), so they don't re-add.)
     function _refundVault(
         ShwounsDAOTypes.Storage storage ds,
         ShwounsDAOTypes.SnapshotState storage ss,
@@ -1094,14 +1102,14 @@ library ShwounsDAOProposals {
         uint256 proposalId,
         uint256 shwounId
     ) internal {
-        address shwounOwner = ds.shwouns.ownerOf(shwounId);
+        address vault = ds.vaultRegistry.vaultOf(shwounId);
         uint256 assetCount = ss.assets.length;
         for (uint256 j = 0; j < assetCount; j++) {
             address asset = ss.assets[j];
             uint256 amt = ss.pulled[shwounId][asset];
             if (amt == 0) continue;
             ss.pulled[shwounId][asset] = 0;
-            IProposalEscrow(escrow).payOut(asset, shwounOwner, amt);
+            IProposalEscrow(escrow).payOut(asset, vault, amt);
             emit StuckProposalRefunded(proposalId, asset, amt);
         }
     }

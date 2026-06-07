@@ -105,8 +105,9 @@ contract ProposalEscrow is ERC721Holder, ERC1155Holder {
     }
 
     /// @notice Pay a specific asset/amount to a recipient. Used ONLY by DAOLogic's contribution
-    ///         refund path; the recipient is derived by DAOLogic from on-chain vault ownership
-    ///         (`ownerOf(shwounId)`), never caller-supplied. Use `address(0)` for native ETH.
+    ///         refund path; the recipient is derived by DAOLogic from the vault registry
+    ///         (`vaultOf(shwounId)` — the contributing vault, whose receive() never reverts), never
+    ///         caller-supplied. Use `address(0)` for native ETH.
     /// @dev A plain constrained transfer — never an arbitrary call, and it never touches DAOLogic's
     ///      executor authentication.
     function payOut(address asset, address to, uint256 amount) external onlyDAOLogic {

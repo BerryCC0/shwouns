@@ -341,17 +341,17 @@ contract LifecycleInvariantsTest is Test {
         // Collected = bob 3 + carol 1.2 = 4.2 (alice 0). NOT the requested 6.
         assertEq(_escrowBal(pid), 4.2 ether, "escrow holds only bob+carol contributions");
 
-        uint256 aliceBefore = alice.balance;
-        uint256 bobBefore = bob.balance;
-        uint256 carolBefore = carol.balance;
+        uint256 aliceVaultBefore = address(aliceVault).balance;
+        uint256 bobVaultBefore = address(bobVault).balance;
+        uint256 carolVaultBefore = address(carolVault).balance;
 
         dao.refundStuckProposal(pid, 100); // admin path (Collected); paged batch covers all
 
-        // M-03: refunded by ACTUAL contribution — alice 0 (drained), bob 3, carol 1.2. The drained
-        // vault gets NO cross-subsidy from the others.
+        // M-03: refunded by ACTUAL contribution — alice 0 (drained), bob 3, carol 1.2 — and F4:
+        // returned to each contributing VAULT, not the owner. The drained vault gets NO cross-subsidy.
         assertEq(_escrowBal(pid), 0, "escrow emptied, never over-refunded");
-        assertEq(alice.balance - aliceBefore, 0, "alice contributed nothing -> refunded nothing");
-        assertEq(bob.balance - bobBefore, 3 ether, "bob refunded his actual contribution");
-        assertEq(carol.balance - carolBefore, 1.2 ether, "carol refunded her actual contribution");
+        assertEq(address(aliceVault).balance - aliceVaultBefore, 0, "alice contributed nothing -> vault refunded nothing");
+        assertEq(address(bobVault).balance - bobVaultBefore, 3 ether, "bob's vault refunded his actual contribution");
+        assertEq(address(carolVault).balance - carolVaultBefore, 1.2 ether, "carol's vault refunded her actual contribution");
     }
 }

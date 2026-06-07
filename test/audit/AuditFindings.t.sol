@@ -105,13 +105,14 @@ contract AuditFindingsTest is LifecycleInvariantsTest {
         dao.cancel(proposalId);
         assertEq(uint256(dao.state(proposalId)), uint256(ShwounsDAOTypes.ProposalState.Canceled));
 
-        uint256 aliceBefore = alice.balance;
+        uint256 aliceVaultBefore = address(aliceVault).balance;
         vm.prank(makeAddr("anyone")); // permissionless: anyone can trigger recovery for contributors
         dao.refund(proposalId, 100);
 
         assertEq(_escrowBal(proposalId), 0, "fully recovered - nothing stranded");
-        // Only the collected vault (alice's) contributed; alice (its owner) is made whole.
-        assertEq(alice.balance - aliceBefore, collected, "contributor refunded actual contribution");
+        // Only the collected vault (alice's) contributed; its contribution returns to that vault (F4),
+        // which alice owns and can withdraw() from.
+        assertEq(address(aliceVault).balance - aliceVaultBefore, collected, "vault refunded actual contribution");
     }
 
     function test_audit_approvalActionDrainsAnotherProposalsERC20() public {
