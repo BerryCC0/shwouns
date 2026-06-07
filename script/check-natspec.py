@@ -14,7 +14,7 @@ artifact key `"ast"`). The AST attributes every member to its DECLARATION SITE: 
 member nodes physically declared inside an in-scope contract, which automatically excludes everything
 inherited from out-of-scope bases and the synthesized public getters.
 
-SCOPE (Groups A + B — see CLAUDE.md "File authority" and docs/DOCUMENTATION_PLAN.md)
+SCOPE (Groups A + B — see CLAUDE.md "File authority")
 -----------------------------------------------------------------------------------
   Group A  original work          — full NatSpec on every declared external/public function, event,
                                      error, and public state variable; internal/private functions are

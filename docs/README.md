@@ -27,8 +27,9 @@ cross-linked — they don't merge.
    (the C-01/C-02 fix; the novel core).
 3. [architecture/storage-layout.md](architecture/storage-layout.md) — the UUPS layout discipline + the
    nested-aware drift gate.
-4. Finding history: [`AUDIT_REPORT.md`](../AUDIT_REPORT.md), [`REMEDIATION_PLAN.md`](../REMEDIATION_PLAN.md),
-   [`ARCHITECTURE_REVIEW_A.md`](../ARCHITECTURE_REVIEW_A.md).
+
+   (The protocol has been through two internal security-review rounds + a focused re-review; an
+   external audit is still recommended. See the root [README](../README.md#status) for gate status.)
 
 ### 🛠️ Contributors
 1. [architecture/relationships.md](architecture/relationships.md) — who owns/calls/references whom +
@@ -76,4 +77,4 @@ docs/
 
 > **Status:** protocol logic complete, 212 tests passing, twice-remediated internally; **not deployed,
 > not externally audited.** Mainnet is frozen pending a Sepolia rehearsal + external audit. The curated
-> docs are derivable from the source + the repo-tracked review documents alone.
+> docs are derivable from the source + CLAUDE.md alone.

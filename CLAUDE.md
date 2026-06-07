@@ -157,10 +157,9 @@ for design rationale — read it before making non-obvious changes.
 
 ## What's NOT done
 
-> **Status (June 2026):** A 3rd review (OpenAI Codex, `AUDIT_REPORT.md`, commit 8c1ac0c) found
+> **Status (June 2026):** A 3rd review (OpenAI Codex, commit 8c1ac0c) found
 > 14 findings (3C/3H/6M/2L) — all verified to reproduce. The **full security remediation is now
-> IMPLEMENTED** on branch `security-remediation` per `REMEDIATION_PLAN.md` v6 +
-> `ARCHITECTURE_REVIEW_A.md`: all 14 findings fixed across 8 phased commits; the 13 audit PoCs are
+> IMPLEMENTED** on branch `security-remediation`: all 14 findings fixed across 8 phased commits; the 13 audit PoCs are
 > flipped to assert safe behavior (permanent regressions); **204 tests pass**. Both UUPS proxies'
 > storage layouts are **byte-identical to baseline** (`./script/check-storage-layout.sh`). Core of
 > the fix: per-proposal `ProposalEscrow` clones execute all actions (closing the C-01/C-02 fund-

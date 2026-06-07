@@ -91,6 +91,6 @@ Bootstrap is permanently disabled. Full sequence: [deployment.md](../flows/deplo
   implementation — that is the A9 trust boundary, called out in `ShwounsAuctionHouse._authorizeUpgrade`.
 - **Vault owners can grief their own proposals' funding** by withdrawing between snapshot and collect.
   This is by design (sovereignty); the shortfall is logged and execution is all-or-nothing.
-- The protocol is **not externally audited and not deployed.** See the root
-  [README](../../README.md#safety-notes) safety notes and `AUDIT_REPORT.md` / `REMEDIATION_PLAN.md` /
-  `ARCHITECTURE_REVIEW_A.md` for the internal-review finding history.
+- The protocol is **not externally audited and not deployed.** Two internal security-review rounds
+  plus a focused re-review of the deploy/refund changes have been remediated; an external audit is
+  still recommended. See the root [README](../../README.md#safety-notes) safety notes.
