@@ -24,18 +24,29 @@ Tokenbound's ERC-6551 stack.
   art bytes are reused from Nouns' deployed `NounsArt` via SSTORE2 pointer sharing —
   cheap (~$50 in gas), CC0-clean.
 
-## Architecture (16 production contracts)
+## Architecture (18 production contracts)
 
 ```
 Token layer:        ShwounsToken, ShwounsSeeder, ShwounsDescriptor, ShwounsArt,
                     Inflator, SVGRenderer
 Vault layer:        ShwounsVault (ERC-6551 impl), ShwounsVaultRegistry (active-set + DAO ref)
 Auction layer:      ShwounsAuctionHouse (UUPS proxy, V3-fork)
-Governance layer:   ShwounsDAOLogic (UUPS facade), ShwounsDAOProposals (library),
-                    ShwounsDAOData (candidates)
+Governance layer:   ShwounsDAOLogic (UUPS facade), ShwounsDAOProposals (library —
+                    propose/vote/state/queue→collect→finalize + dynamic-quorum compute),
+                    ShwounsDAOSignatures (library — EIP-712 signed proposals + editing),
+                    ShwounsDAOQuorum (library — dynamic-quorum checkpoint admin),
+                    ShwounsDAOData (candidates), GovernanceAuthRegistry, GovernedOwnable
 Rewards layer:      GovernanceRewards, GovernanceIncentivesNFT, ApprovalRegistry
-Deployment helper:  Deploy.s.sol, CopyArtFromNouns.s.sol
+Execution layer:    ProposalEscrow (per-proposal EIP-1167 clone)
+Deployment helper:  Bootstrap (generic operator-gated CREATE2 coordinator), ShwounsDeployer
+                    (library — shared deploy orchestration + library link-patching),
+                    Deploy.s.sol, CopyArtFromNouns.s.sol
 ```
+
+> The governance library is split across three libraries (ShwounsDAOProposals /
+> ShwounsDAOSignatures / ShwounsDAOQuorum) and `via_ir = true` so the facade + each library fit
+> under EIP-170. The HOT paths (propose/vote/state + the dynamic-quorum compute) stay in
+> ShwounsDAOProposals as same-library JUMPs; the cold sig/editing + quorum-admin paths delegatecall.
 
 ## Proposal lifecycle (the novel mechanic)
 
@@ -73,27 +84,32 @@ of the proposal's reward pool (0.1 ETH default). Abstain voters don't earn.
 
 ## Deployment
 
+The deployer EOA becomes the Bootstrap `operator` (the only address that can drive it); all protocol
+roles are held by the persistent Bootstrap until `finalizeBootstrap`, then atomically handed to the
+DAO. No `new X()` embedded code — ShwounsDeployer reads creation bytecode from artifacts (`vm.getCode`)
+and link-patches the libraries, so it requires the built artifacts on disk.
+
 ```bash
-# Mainnet
-FOUNDERS_DAO=0x...  ADMIN_TARGET=0x...  \
+# 1. Deploy + wire everything via Bootstrap (deploy-only: paused, all roles with Bootstrap).
+FOUNDERS_DAO=0x...  \
   forge script script/Deploy.s.sol --rpc-url $MAINNET_RPC --broadcast --verify
+#    → note the Bootstrap address (b) and manifest (m.descriptor) from the run output.
 
-# Then accept DAO admin
-cast send $DAO acceptAdmin
-
-# Copy Nouns art via SSTORE2 pointer sharing (~$50 in gas)
-SHWOUNS_DESCRIPTOR=$DESCRIPTOR  \
+# 2. Copy Nouns art via SSTORE2 pointer sharing (~$50), routed through Bootstrap (it owns the
+#    descriptor). One executeBatch tx.
+SHWOUNS_BOOTSTRAP=$BOOTSTRAP  SHWOUNS_DESCRIPTOR=$DESCRIPTOR  \
   forge script script/CopyArtFromNouns.s.sol --rpc-url $MAINNET_RPC --broadcast
 
-# Lock parts when art is final
-cast send $DESCRIPTOR lockParts
+# 3. Lock parts when art is final (operator → Bootstrap → descriptor).
+cast send $BOOTSTRAP 'execute(address,bytes)' $DESCRIPTOR $(cast calldata 'lockParts()')
 
-# Unpause auction (kicks off first auction)
-cast send $AUCTION_HOUSE unpause
-
-# Hand off all ownership to DAO
-cast send $DEPLOY_CONTRACT 'transferOwnershipToDAO(...)'
+# 4. One-shot atomic handoff: validates all wiring/locks/immutables, binds the registry, unpauses
+#    (kicks off auction #1), transfers every Ownable to the DAO, sets DAO admin. Reverts if any
+#    precheck fails (never a silent bad handoff). Permanently disables Bootstrap.
+cast send $BOOTSTRAP finalizeBootstrap
 ```
+
+Rehearse the whole runbook locally first: `./script/rehearse-deploy.sh` (anvil + minimal art).
 
 For **testnet** (Sepolia, etc.) deployments, Nouns Art isn't deployed there, so
 `CopyArtFromNouns` won't work. Options:
@@ -104,10 +120,17 @@ For **testnet** (Sepolia, etc.) deployments, Nouns Art isn't deployed there, so
 ## Build & test
 
 ```bash
-forge build       # ~10 sec
-forge test        # ~30 sec; 102 tests across 15 suites
-forge test -vvv   # with trace output
+forge build --sizes          # via_ir; verify EVERY contract < 24,576 (EIP-170 gate, audit F1)
+forge test                   # 212 tests across 26 suites
+forge test -vvv              # with trace output
+./script/check-storage-layout.sh   # nested storage-layout drift gate (audit F5)
+./script/rehearse-deploy.sh        # anvil --broadcast full deploy rehearsal (audit plan-review F4)
 ```
+
+> `via_ir = true` is required (the facade doesn't fit EIP-170 otherwise — optimizer_runs bottomed at
+> ~207 bytes over even at runs=1). `forge build` (no `--sizes`) does NOT enforce EIP-170 — always use
+> `--sizes`. via_ir treats `block.timestamp`/`block.number` as tx-invariant (correct for prod), so
+> tests must not `vm.warp`/`vm.roll` mid-function and then re-read them in a loop.
 
 Forge is at `~/.foundry/bin/forge` (may or may not be in PATH depending on session env;
 user-level `~/.claude/settings.json` adds it to PATH for future Claude Code sessions).
@@ -148,15 +171,32 @@ for design rationale — read it before making non-obvious changes.
 >
 > _(Earlier: the correctness gate + V4 parity landed on `governance-parity-and-lifecycle-fixes`,
 > which `security-remediation` builds on. See `~/.claude/plans/hey-claude-we-ve-been-velvet-canyon.md`.)_
+>
+> **Round 2 (June 2026):** A focused post-implementation audit found **5 findings (4 blockers + 1
+> medium)** — the protocol logic was sound but the system was undeployable + insecure to deploy + had
+> a DoS-able refund. ALL FIXED on `security-remediation` (plan
+> `~/.claude/plans/audit-findings-critical-deployment-reactive-bachman.md`): **F1** EIP-170 — split
+> the governance library into ShwounsDAOProposals/Signatures/Quorum + `via_ir` (Bootstrap 143KB→16KB;
+> every contract now < 24,576, gated by `forge build --sizes`); **F2** front-running — generic
+> operator-gated Bootstrap (CREATE2 deploy + execute + manifest + atomic finalize, no permissionless
+> entry); **F3** art-loading — CopyArtFromNouns routes onlyOwner descriptor ops through
+> `bootstrap.executeBatch`; **F4** refund DoS — refunds go to the vault (non-reverting receive), not a
+> hostile NFT owner; **F5** storage gate — recursive nested-aware JSON diff that catches reorders
+> inside `Storage`/`Proposal`/`SnapshotState`. **212 tests pass**, storage layout unchanged, and the
+> full deploy+art+finalize runbook broadcasts cleanly on anvil (`./script/rehearse-deploy.sh`, 41 txs).
+> **Do NOT deploy** until a focused RE-review of the Bootstrap rewrite + the refund-recipient change
+> (the new attack surface this round introduced).
 
+- **Focused re-review (the gate)** — review the generic CREATE2 Bootstrap + ShwounsDeployer link-
+  patching + the refund-to-vault change before any Sepolia/mainnet deploy.
 - **Remaining V4 parity** — admin param bounds + `initialize` validation (needs migrating tests off
   votingPeriod=5 / threshold=0), dynamic-quorum seed-at-init, proposal editing (Updatable +
   `queueDeadline`/`Expired`), bulk `proposals()` getter, and a mechanical ABI parity checklist.
 - **External audit** — recommended firms: Spearbit, Code4rena, Cantina. Budget $5-15k,
   2-4 weeks lead time. Snapshot+collect+finalize mechanic is novel and warrants focused
   review.
-- **Sepolia dress rehearsal** — script is runnable but never tested end-to-end on a
-  real RPC. Worth doing before mainnet.
+- **Sepolia dress rehearsal** — the anvil rehearsal passes; a real-RPC Sepolia run (re-encoding art,
+  since Nouns Art isn't on testnet) is still worth doing before mainnet.
 - **Production deploy** — half a day once audit feedback is incorporated.
 - **Brand call** — token name/symbol use "Shwouns"/"SHWN". Final branding (logo, site,
   social handles) is product-side work, not protocol.
