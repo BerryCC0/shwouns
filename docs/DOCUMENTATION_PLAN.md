@@ -42,14 +42,33 @@ docs/
   reference/                     # forge doc OUTPUT (generated book) — set [doc] out = "docs/reference"
 ```
 
-> `forge doc`'s default output is `./docs`, which would clobber the hand-authored tree. **Add to
-> `foundry.toml`:** `[doc]` with `out = "docs/reference"` (and optionally `title = "Shwouns"`), so the
-> generated reference lands in `docs/reference/` and the curated docs live alongside it.
+### Publication model (decided)
 
-## Contract inventory by doc depth (55 .sol files)
+**Two explicitly cross-linked documentation sets — NOT one auto-merged book:**
+1. **Curated docs** (`docs/overview.md`, `concepts/`, `architecture/`, `flows/`) — plain
+   GitHub-rendered Markdown with Mermaid. This is the **primary** entry point; `docs/README.md`
+   is its index with per-audience reading paths. No build step.
+2. **Generated reference** (`docs/reference/`) — the `forge doc` mdBook (its own `SUMMARY.md`,
+   `src/`-only). This is the **API reference**, linked FROM the curated docs (and its homepage links
+   back). The curated pages will NOT appear in the generated book's nav and vice-versa — that's
+   expected; they cross-link, they don't merge.
+
+> **`forge doc` config (do this before the first generated output):** its default output is `./docs`,
+> which would clobber the curated tree, and it copies the **root `README.md` as the book homepage**.
+> Add to `foundry.toml` a `[doc]` section with `out = "docs/reference"` (and optionally
+> `title = "Shwouns"`). The root `README.md` is the generated homepage, so it MUST stay current — it
+> was refreshed in this branch (Bootstrap runbook, 212 tests, post-remediation status); keep it in
+> sync, or set `[doc] homepage` to a dedicated reference-intro page instead.
+
+## Contract inventory by doc depth (59 .sol files: 55 `src/` + 4 `script/`)
 
 The depth differs sharply by origin — don't spend equal effort everywhere. See `CLAUDE.md` "File
 authority" for the canonical origin table.
+
+> **`forge doc` only documents `src/`** — the four `script/` files get NO generated reference. They
+> must be hand-authored as an **operational reference** page (`flows/deployment.md` covers the runbook;
+> add a short per-script section: purpose, entrypoints, env vars, what it deploys/drives). All four are
+> in scope: `ShwounsDeployer.sol`, `Deploy.s.sol`, `CopyArtFromNouns.s.sol`, `RehearseDeploy.s.sol`.
 
 **A. Original work — DOCUMENT DEEPLY (full NatSpec on every fn + featured in flows):**
 - Auction: `auction/ShwounsAuctionHouse.sol`
@@ -60,7 +79,8 @@ authority" for the canonical origin table.
   `data/ShwounsDAOData.sol`
 - Rewards: `rewards/GovernanceRewards.sol`, `GovernanceIncentivesNFT.sol`, `ApprovalRegistry.sol`
 - Vault: `vault/ShwounsVault.sol`, `ShwounsVaultRegistry.sol`, `IShwounsVaultRegistry.sol`
-- Scripts/libs: `script/ShwounsDeployer.sol`, `Deploy.s.sol`, `CopyArtFromNouns.s.sol`
+- Scripts (hand-authored operational reference — `forge doc` skips `script/`):
+  `script/ShwounsDeployer.sol`, `Deploy.s.sol`, `CopyArtFromNouns.s.sol`, `RehearseDeploy.s.sol`
 
 **B. Forked Nouns, glasses removed — DOCUMENT + note the fork + the diff:**
 - `token/ShwounsToken.sol`, `ShwounsDescriptor.sol`, `ShwounsSeeder.sol`, `ShwounsArt.sol`
@@ -85,9 +105,34 @@ authority" for the canonical origin table.
   `forge build` with `--no-cache` surfaces missing-NatSpec nothing by default, so just scan the
   generated `docs/reference/` for thin function entries.
 - Much rationale already lives in block comments from the remediation; the pass is largely
-  converting/with formal `@param`/`@return` tags, not writing from scratch. Group A first.
-- Preserve the `*.original` pristine references and forked-lib files per `CLAUDE.md` File authority —
-  for C/D, add a top-of-file `@dev Forked from <source> @ <ref>; changes: <…>` and don't churn bodies.
+  converting/with formal `@param`/`@return` tags, not writing from scratch. Group A first, then B.
+- **Respect File authority (`CLAUDE.md`): NatSpec ONLY the editable files** — Group A (original work)
+  and Group B (forked Nouns, glasses-removed, marked "Yes"). Do **NOT** edit Group C/D files marked
+  "No — do not edit" (`*.original`, the ERC-6551 reference under `vault/erc6551/*`, the Nouns libs
+  `Inflate`/`SSTORE2`/`NFTDescriptorV2`, `SVGRenderer`/`Inflator`). Their origins, the stripped
+  features (esp. Tokenbound's `Overridable` removal + non-upgradeable impl), and their interface
+  surface are documented in **curated pages** (`architecture/relationships.md` + a "Forked components"
+  section), never by editing the files. `vault/abstract/*` and `vault/lib/*` are "with care" — prefer
+  curated docs there too; touch only if genuinely necessary.
+
+## Coverage gate (measurable — replaces "scan for thin pages")
+
+"Every function" needs a precise, reproducible definition (the repo has ~695 function-like
+declarations; visual scanning isn't a gate). Define coverage as:
+
+- **In scope (must have full NatSpec):** every contract/library/interface in Groups A + B, and for
+  each, **every** `external`/`public` function (`@notice` + `@param` for each arg + `@return` for each
+  return), **every** event, and **every** custom error (`@notice`).
+- **Internal/private:** in Group A, security-critical internal/private functions require at least
+  `@dev` (the escrow/auth/finalize/refund/collect paths especially). Trivial getters/helpers exempt.
+- **Out of scope:** Group C/D forked/reference files (documented in curated pages, not edited).
+
+**Reproducible check (build it as part of this work): `script/check-natspec.py`** — for each in-scope
+contract, compare its ABI (`forge inspect <C> abi`) against its `userdoc` + `devdoc`
+(`forge inspect <C> userdoc` / `devdoc`, or `solc --userdoc --devdoc`): flag any external/public
+function, event, or error missing a `@notice`, and any function param/return missing its tag. Exit
+non-zero on gaps so it can gate CI alongside `check-storage-layout.sh`. This makes "documented" a
+build check, not a judgment call.
 
 ## Visuals to author
 
@@ -112,22 +157,34 @@ Hand-authored Mermaid (highest value — auto-tools miss the semantics):
 6. **ProposalState machine** — all 14 states incl. the transient `Executing` (state diagram).
 7. **Reward accounting** — allocate→reserve (`totalReserved`)→claim (dual flag)→180d deadline release.
 
-## Source-of-truth inputs (already in the repo / workspace)
+## Source-of-truth inputs
 
+**Authoritative (repo-tracked, portable to all contributors + CI — the docs MUST be derivable from
+these alone):**
+- The **source code** (NatSpec + comments) — the ground truth.
 - `CLAUDE.md` — architecture, layers, invariants, File authority, deploy runbook.
-- Project memory (`~/.claude/.../memory/project_shwouns.md`) — full design + remediation history.
-- Plan files in `~/.claude/plans/` — `what-happens-to-a-lucky-meteor.md` (original design + AVP),
-  `hey-claude-we-ve-been-velvet-canyon.md` (round-1), `audit-findings-critical-deployment-reactive-bachman.md` (round-2).
 - `AUDIT_REPORT.md`, `REMEDIATION_PLAN.md`, `ARCHITECTURE_REVIEW_A.md` — finding-level detail for the
   auditor-facing sections.
-- `docs/storage-layout/*.norm.json` — the storage gate snapshots.
+- `docs/storage-layout/*.norm.json` — the storage-gate snapshots.
+
+**Optional background (local to one machine — NOT available to other contributors or CI; never the
+sole basis for any documented claim):**
+- Project memory `~/.claude/.../memory/project_shwouns.md` and the plan files in `~/.claude/plans/`
+  (`what-happens-to-a-lucky-meteor.md`, `hey-claude-we-ve-been-velvet-canyon.md`,
+  `audit-findings-critical-deployment-reactive-bachman.md`). Useful design/decision history, but if a
+  claim only lives there, move it into a repo-tracked doc before relying on it.
 
 ## Suggested order
 
-1. `[doc] out = "docs/reference"` in `foundry.toml`; run `forge doc` to get the baseline + see gaps.
-2. NatSpec pass, Group A → B → (light C/D). Regenerate `forge doc`.
-3. `overview.md` + the system-map diagram (gives everything a spine).
-4. The four `flows/` sequence diagrams (the highest-value visuals).
-5. `architecture/` (relationships, auth-and-trust, storage-layout) + generated SVGs.
-6. `concepts/` (community) + `README.md` reading paths.
-7. Keep `main` deploy-frozen; docs work can merge independently of the Sepolia gate.
+0. **Done in this branch:** the root `README.md` was refreshed (it's the `forge doc` homepage — must
+   not publish stale deploy instructions). Re-verify it still matches before the first generated build.
+1. Add `[doc] out = "docs/reference"` to `foundry.toml`; run `forge doc` for the baseline.
+2. Build `script/check-natspec.py` (the coverage gate) so "documented" is measurable from the start.
+3. NatSpec pass, **Group A → Group B only** (never edit C/D — document those in curated pages).
+   Re-run the coverage gate to zero; regenerate `forge doc`.
+4. `overview.md` + the system-map diagram (gives everything a spine).
+5. The four `flows/` sequence diagrams (highest-value visuals) — incl. the hand-authored **script
+   operational reference** in `flows/deployment.md` (forge doc skips `script/`).
+6. `architecture/` (relationships, auth-and-trust, storage-layout, "Forked components") + generated SVGs.
+7. `concepts/` (community) + `docs/README.md` reading paths, cross-linked to `docs/reference/`.
+8. Keep `main` deploy-frozen; docs work merges independently of the Sepolia gate.
