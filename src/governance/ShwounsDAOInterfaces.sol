@@ -22,13 +22,29 @@ import { IShwounsVaultRegistry } from "../vault/IShwounsVaultRegistry.sol";
 ///         totalSupply / getPriorVotes / getCurrentVotes (which are inherited from
 ///         ERC721Enumerable and ERC721Checkpointable).
 interface IShwounsTokenLike {
+    /// @notice The total Shwoun supply (the basis for BPS thresholds/quorum).
+    /// @return The total supply.
     function totalSupply() external view returns (uint256);
+
+    /// @notice The current voting weight of an account.
+    /// @param account The account to query.
+    /// @return The current votes.
     function getCurrentVotes(address account) external view returns (uint96);
+
+    /// @notice The voting weight of an account at a past block (Compound-style checkpoints).
+    /// @param account The account to query.
+    /// @param blockNumber The historical block.
+    /// @return The votes at that block.
     function getPriorVotes(address account, uint256 blockNumber) external view returns (uint96);
+
+    /// @notice The owner of a Shwoun.
+    /// @param tokenId The Shwoun id.
+    /// @return The owner address.
     function ownerOf(uint256 tokenId) external view returns (address);
 }
 
 interface ShwounsDAOEvents {
+    /// @notice Emitted when a proposal is created.
     event ProposalCreated(
         uint256 id,
         address proposer,
@@ -41,12 +57,19 @@ interface ShwounsDAOEvents {
         string description
     );
 
+    /// @notice Emitted on each vote cast, with the voter's weight and reason.
     event VoteCast(address indexed voter, uint256 proposalId, uint8 support, uint256 votes, string reason);
+    /// @notice Emitted when a proposal is canceled.
     event ProposalCanceled(uint256 id);
+    /// @notice Emitted when a proposal is queued.
     event ProposalQueued(uint256 id);
+    /// @notice Emitted once per asset when a proposal's snapshot phase completes.
     event ProposalSnapshotted(uint256 indexed id, address indexed asset, uint256 totalSnapshotBalance);
+    /// @notice Emitted when a proposal's collect phase completes.
     event ProposalCollected(uint256 indexed id);
+    /// @notice Emitted when a proposal's actions execute successfully.
     event ProposalExecuted(uint256 id);
+    /// @notice Emitted when a proposal is vetoed.
     event ProposalVetoed(uint256 id);
 
     /// @notice Emitted per (proposal, vault, asset) during recordSnapshot.
@@ -62,14 +85,23 @@ interface ShwounsDAOEvents {
     event FinalizeAttemptFailed(uint256 indexed proposalId, uint256 actionIndex, bytes returnData);
 
     // -- Parameter change events --
+    /// @notice Emitted when the voting delay changes.
     event VotingDelaySet(uint256 oldVotingDelay, uint256 newVotingDelay);
+    /// @notice Emitted when the voting period changes.
     event VotingPeriodSet(uint256 oldVotingPeriod, uint256 newVotingPeriod);
+    /// @notice Emitted when the proposal threshold BPS changes.
     event ProposalThresholdBPSSet(uint256 oldProposalThresholdBPS, uint256 newProposalThresholdBPS);
+    /// @notice Emitted when the admin changes.
     event NewAdmin(address oldAdmin, address newAdmin);
+    /// @notice Emitted when the pending admin changes.
     event NewPendingAdmin(address oldPendingAdmin, address newPendingAdmin);
+    /// @notice Emitted when the vetoer changes (including burn-to-zero).
     event NewVetoer(address oldVetoer, address newVetoer);
+    /// @notice Emitted when the minimum quorum BPS changes.
     event MinQuorumVotesBPSSet(uint16 oldMinQuorumVotesBPS, uint16 newMinQuorumVotesBPS);
+    /// @notice Emitted when the maximum quorum BPS changes.
     event MaxQuorumVotesBPSSet(uint16 oldMaxQuorumVotesBPS, uint16 newMaxQuorumVotesBPS);
+    /// @notice Emitted when the quorum coefficient changes.
     event QuorumCoefficientSet(uint32 oldQuorumCoefficient, uint32 newQuorumCoefficient);
 }
 

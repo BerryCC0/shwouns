@@ -19,12 +19,17 @@ import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { IGovernanceAuthRegistry } from "./GovernanceAuthRegistry.sol";
 
 abstract contract GovernedOwnable is Ownable {
+    /// @notice The fail-closed registry consulted to recognize the active proposal escrow as an
+    ///         authorized caller of `onlyOwner` functions. `address(0)` reduces this to plain Ownable.
     IGovernanceAuthRegistry public immutable governanceAuth;
 
+    /// @param _governanceAuth The GovernanceAuthRegistry, or `address(0)` for plain-Ownable behavior.
     constructor(address _governanceAuth) {
         governanceAuth = IGovernanceAuthRegistry(_governanceAuth);
     }
 
+    /// @notice Thrown when, after the auth registry is bound, ownership transfer targets an address
+    ///         that is neither the canonical DAO nor `address(0)`.
     error OwnerMustBeDAOOrZero();
 
     /// @dev Accept the structural owner OR the active proposal escrow. Mirrors OZ's revert message
@@ -40,6 +45,8 @@ abstract contract GovernedOwnable is Ownable {
     ///         window, when only the trusted Bootstrap coordinator owns these contracts) this is
     ///         standard Ownable, so Bootstrap can wire and hand off. renounceOwnership (→ zero) is
     ///         always permitted.
+    /// @param newOwner The proposed owner. Once the registry is bound, must be the canonical DAO or
+    ///        `address(0)`; before binding, any address (so Bootstrap can wire and hand off).
     function transferOwnership(address newOwner) public virtual override onlyOwner {
         if (address(governanceAuth) != address(0)) {
             address dao = governanceAuth.daoLogic();

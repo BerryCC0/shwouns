@@ -16,7 +16,9 @@ import { ERC721 } from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import { GovernedOwnable } from "../governance/GovernedOwnable.sol";
 
 contract GovernanceIncentivesNFT is ERC721, GovernedOwnable {
+    /// @notice Price (in wei) to mint one GI NFT. Owner-settable by the DAO.
     uint256 public mintPrice;
+    /// @notice The id the next mint will assign (ids start at 1; 0 is reserved as "no token").
     uint256 public nextTokenId = 1;
 
     /// @notice Recipient of mint proceeds (A6). Decoupled from `owner()` so the DAO can OWN the GI
@@ -24,11 +26,16 @@ contract GovernanceIncentivesNFT is ERC721, GovernedOwnable {
     ///         Falls back to `owner()` until set.
     address public proceedsRecipient;
 
+    /// @notice Emitted when the mint price changes.
     event MintPriceUpdated(uint256 oldPrice, uint256 newPrice);
+    /// @notice Emitted when the proceeds recipient changes.
     event ProceedsRecipientUpdated(address oldRecipient, address newRecipient);
+    /// @notice Emitted on each mint, recording the buyer, token id, and ETH paid.
     event Minted(address indexed to, uint256 indexed tokenId, uint256 pricePaid);
 
+    /// @notice Thrown when `mint` is sent less than `mintPrice`.
     error InsufficientPayment();
+    /// @notice Thrown when forwarding mint proceeds to the recipient fails.
     error ProceedsForwardFailed();
 
     constructor(uint256 _mintPrice, address _governanceAuth)
@@ -40,6 +47,7 @@ contract GovernanceIncentivesNFT is ERC721, GovernedOwnable {
 
     /// @notice Mint a new GI NFT. Must send at least `mintPrice` ETH. Proceeds forward to
     ///         `proceedsRecipient` (GovernanceRewards), or `owner()` if unset.
+    /// @return tokenId The id of the newly-minted GI NFT.
     function mint() external payable returns (uint256 tokenId) {
         if (msg.value < mintPrice) revert InsufficientPayment();
         tokenId = nextTokenId++;
@@ -53,6 +61,8 @@ contract GovernanceIncentivesNFT is ERC721, GovernedOwnable {
         }
     }
 
+    /// @notice Set the mint price. Governable (owner = DAO via the active escrow).
+    /// @param newPrice The new mint price in wei.
     function setMintPrice(uint256 newPrice) external onlyOwner {
         uint256 old = mintPrice;
         mintPrice = newPrice;
@@ -60,6 +70,7 @@ contract GovernanceIncentivesNFT is ERC721, GovernedOwnable {
     }
 
     /// @notice Set where mint proceeds are forwarded (A6). Governable (owner = DAO via escrow).
+    /// @param newRecipient The new proceeds recipient (typically GovernanceRewards).
     function setProceedsRecipient(address newRecipient) external onlyOwner {
         address old = proceedsRecipient;
         proceedsRecipient = newRecipient;

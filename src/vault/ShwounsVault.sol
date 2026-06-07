@@ -47,14 +47,21 @@ contract ShwounsVault is
     /// @notice The Shwouns VaultRegistry. Immutable per impl deployment.
     IShwounsVaultRegistry public immutable vaultRegistry;
 
+    /// @notice Thrown when the constructor is given a zero vault-registry address.
     error InvalidVaultRegistry();
+    /// @notice Thrown when `pullProRata` is called by anything other than the registered DAOLogic.
     error NotDAOLogic();
+    /// @notice Thrown when an ETH withdraw/pull exceeds the vault's balance.
     error InsufficientBalance();
+    /// @notice Thrown when a native-ETH transfer out of the vault fails.
     error ETHTransferFailed();
     // OwnershipCycle, NotAuthorized, InvalidInput inherited from utils/Errors.sol
 
+    /// @notice Emitted on every deposit. `asset` is `address(0)` for native ETH.
     event Deposited(address indexed asset, address indexed from, uint256 amount);
+    /// @notice Emitted on every withdrawal. `asset` is `address(0)` for native ETH.
     event Withdrawn(address indexed asset, address indexed to, uint256 amount);
+    /// @notice Emitted when DAOLogic pulls a proposal's pro-rata share from this vault.
     event ProRataPulled(uint256 indexed proposalId, address indexed asset, address indexed recipient, uint256 amount);
 
     constructor(address _vaultRegistry) {
@@ -83,6 +90,8 @@ contract ShwounsVault is
     }
 
     /// @notice Deposit an ERC-20. Caller must have approved the vault first.
+    /// @param token The ERC-20 to pull from the caller.
+    /// @param amount The amount to deposit.
     function depositERC20(address token, uint256 amount) external {
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         emit Deposited(token, msg.sender, amount);
@@ -94,6 +103,8 @@ contract ShwounsVault is
     // -------------------------------------------------------------------------
 
     /// @notice Withdraw ETH to a recipient. Restricted to owner or permissioned address.
+    /// @param recipient The address to send ETH to.
+    /// @param amount The amount of ETH to withdraw.
     function withdraw(address recipient, uint256 amount) external {
         if (!_isValidExecutor(_msgSender())) revert NotAuthorized();
         _beforeExecute();
@@ -105,6 +116,9 @@ contract ShwounsVault is
     }
 
     /// @notice Withdraw an ERC-20 to a recipient. Restricted to owner or permissioned address.
+    /// @param token The ERC-20 to withdraw.
+    /// @param recipient The address to send the tokens to.
+    /// @param amount The amount to withdraw.
     function withdrawERC20(address token, address recipient, uint256 amount) external {
         if (!_isValidExecutor(_msgSender())) revert NotAuthorized();
         _beforeExecute();
@@ -114,6 +128,9 @@ contract ShwounsVault is
     }
 
     /// @notice Batch withdraw multiple ERC-20s to a single recipient.
+    /// @param tokens The ERC-20s to withdraw (parallel to `amounts`).
+    /// @param recipient The address to send all tokens to.
+    /// @param amounts The amount to withdraw for each token in `tokens`.
     function withdrawERC20s(
         address[] calldata tokens,
         address recipient,
@@ -161,6 +178,7 @@ contract ShwounsVault is
     // -------------------------------------------------------------------------
 
     /// @notice Returns the current Noun NFT owner. Zero if the bound token doesn't exist on this chain.
+    /// @return The address that owns the bound Shwoun, or `address(0)`.
     function owner() public view virtual returns (address) {
         (uint256 chainId, address tokenContract, uint256 tokenId) = ERC6551AccountLib.token();
         return _tokenOwner(chainId, tokenContract, tokenId);
@@ -177,7 +195,10 @@ contract ShwounsVault is
         return super.supportsInterface(interfaceId);
     }
 
+    /// @notice ERC-721 receiver hook. Accepts incoming NFTs except the bound Shwoun itself.
     /// @dev Revert if the NFT being transferred IN is the same one this account is bound to.
+    /// @param tokenId The id of the NFT being received.
+    /// @return The ERC-721 receiver magic value.
     function onERC721Received(address, address, uint256 tokenId, bytes memory)
         public
         virtual
@@ -191,6 +212,8 @@ contract ShwounsVault is
         return this.onERC721Received.selector;
     }
 
+    /// @dev Signer is valid iff it is the bound Shwoun's owner or an address that owner has granted
+    ///      permission to (Permissioned). Backs ERC-1271 validation.
     function _isValidSigner(address signer, bytes memory)
         internal
         view
@@ -241,6 +264,8 @@ contract ShwounsVault is
         return _isValidSigner(signer, "");
     }
 
+    /// @dev Executor is authorized to withdraw / call from the vault iff it is the bound Shwoun's
+    ///      owner or a Permissioned address of that owner. Gates withdraw/withdrawERC20/execute.
     function _isValidExecutor(address executor) internal view virtual override returns (bool) {
         (uint256 chainId, address tokenContract, uint256 tokenId) = ERC6551AccountLib.token();
         address _owner = _tokenOwner(chainId, tokenContract, tokenId);

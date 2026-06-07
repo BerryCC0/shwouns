@@ -33,6 +33,7 @@ library ShwounsDAOSignatures {
     );
 
     // Re-declared so the library can emit them; topics match ShwounsDAOEvents / ShwounsDAOProposals.
+    /// @notice Emitted when a proposal is created (mirrors ShwounsDAOProposals for proposeBySigs).
     event ProposalCreated(
         uint256 id,
         address proposer,
@@ -44,28 +45,42 @@ library ShwounsDAOSignatures {
         uint256 endBlock,
         string description
     );
+    /// @notice Emitted when a signer cancels one of their proposal signatures.
     event SignatureCancelled(address indexed signer, bytes sig);
+    /// @notice Emitted after proposeBySigs, listing the proposal's co-signers.
     event ProposalCreatedWithSigners(uint256 indexed id, address[] signers);
+    /// @notice Emitted when a proposal's actions and description are edited (Updatable window).
     event ProposalUpdated(
         uint256 indexed id, address indexed proposer, address[] targets, uint256[] values,
         string[] signatures, bytes[] calldatas, string description, string updateMessage
     );
+    /// @notice Emitted when only a proposal's transactions are edited.
     event ProposalTransactionsUpdated(
         uint256 indexed id, address indexed proposer, address[] targets, uint256[] values,
         string[] signatures, bytes[] calldatas, string updateMessage
     );
+    /// @notice Emitted when only a proposal's description is edited.
     event ProposalDescriptionUpdated(
         uint256 indexed id, address indexed proposer, string description, string updateMessage
     );
 
+    /// @notice Thrown when a proposal signature has expired.
     error SigExpired();
+    /// @notice Thrown when a proposal signature was cancelled by its signer.
     error SigCancelled();
+    /// @notice Thrown when a proposal signature fails ERC-1271/ECDSA verification.
     error SigInvalid();
+    /// @notice Thrown when the combined signer + proposer voting power does not exceed the threshold.
     error SignersBelowThreshold();
+    /// @notice Thrown when editing a proposal that is not in the Updatable window.
     error CanOnlyEditUpdatableProposals();
+    /// @notice Thrown when an editor is not the proposal's proposer (or the signer set mismatches).
     error OnlyProposerCanEdit();
+    /// @notice Thrown when the non-sig edit path is used on a proposal that has co-signers.
     error ProposerCannotUpdateProposalWithSigners();
+    /// @notice Thrown when the re-signing set size differs from the original signer set.
     error SignerCountMismatch();
+    /// @notice Thrown when a signer or proposer already has a live proposal in flight.
     error ProposerAlreadyHasLiveProposal();
 
     /// @dev Bundles a proposal's action arrays into one memory pointer. updateProposalBySigs takes
@@ -87,6 +102,13 @@ library ShwounsDAOSignatures {
     ///         proposer's must STRICTLY exceed the proposal threshold. Each signature binds the
     ///         proposer, the proposal actions, and that signer's own expiry, and is verified via
     ///         ERC-1271 (so smart-contract wallets can co-sign). Mirrors NounsDAOProposals.
+    /// @param proposerSignatures The co-signers' EIP-712 signatures, each with signer + expiry.
+    /// @param targets The action target addresses.
+    /// @param values The ETH value for each action.
+    /// @param signatures The function signature strings for each action (GovernorBravo form).
+    /// @param calldatas The calldata (or args) for each action.
+    /// @param description The proposal description.
+    /// @return proposalId The id of the created proposal.
     function proposeBySigs(
         ShwounsDAOTypes.Storage storage ds,
         ShwounsDAOTypes.ProposerSignature[] memory proposerSignatures,
@@ -161,6 +183,9 @@ library ShwounsDAOSignatures {
         }
     }
 
+    /// @dev Per-signer one-live-proposal guard (the proposeBySigs analog of _enforceOneLiveProposal):
+    ///      reverts if `proposer` already has a proposal in flight. Because the proposal is created
+    ///      BEFORE signatures are verified, this also de-duplicates a repeated signer for free.
     function _enforceOneLiveProposalFor(ShwounsDAOTypes.Storage storage ds, address proposer) internal view {
         if (ds.latestProposalIds[proposer] == 0) return;
         ShwounsDAOTypes.ProposalState s = ShwounsDAOProposals.state(ds, ds.latestProposalIds[proposer]);
@@ -174,6 +199,7 @@ library ShwounsDAOSignatures {
 
     /// @notice Allow a signer to invalidate a specific signature. After cancellation,
     ///         proposeBySigs will reject that sig.
+    /// @param sig The exact signature bytes to invalidate (keyed by its keccak hash).
     function cancelSig(ShwounsDAOTypes.Storage storage ds, bytes calldata sig) external {
         ds.cancelledSigs[msg.sender][keccak256(sig)] = true;
         emit SignatureCancelled(msg.sender, sig);
@@ -196,6 +222,15 @@ library ShwounsDAOSignatures {
         if (proposal.signers.length > 0) revert ProposerCannotUpdateProposalWithSigners();
     }
 
+    /// @notice Edit a proposal's actions AND description during its Updatable window. Proposer only,
+    ///         and only for proposals with no co-signers (those use updateProposalBySigs).
+    /// @param proposalId The proposal to edit.
+    /// @param targets The new action target addresses.
+    /// @param values The new ETH value for each action.
+    /// @param signatures The new function signature strings for each action.
+    /// @param calldatas The new calldata (or args) for each action.
+    /// @param description The new proposal description.
+    /// @param updateMessage A human-readable note describing the edit.
     function updateProposal(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -210,6 +245,13 @@ library ShwounsDAOSignatures {
         emit ProposalUpdated(proposalId, msg.sender, targets, values, signatures, calldatas, description, updateMessage);
     }
 
+    /// @notice Edit only a proposal's transactions during its Updatable window. Proposer only.
+    /// @param proposalId The proposal to edit.
+    /// @param targets The new action target addresses.
+    /// @param values The new ETH value for each action.
+    /// @param signatures The new function signature strings for each action.
+    /// @param calldatas The new calldata (or args) for each action.
+    /// @param updateMessage A human-readable note describing the edit.
     function updateProposalTransactions(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -240,6 +282,10 @@ library ShwounsDAOSignatures {
         p.calldatas = calldatas;
     }
 
+    /// @notice Edit only a proposal's description during its Updatable window. Proposer only.
+    /// @param proposalId The proposal to edit.
+    /// @param description The new proposal description.
+    /// @param updateMessage A human-readable note describing the edit.
     function updateProposalDescription(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -257,6 +303,11 @@ library ShwounsDAOSignatures {
     /// @dev `txs` bundles the four action arrays into one memory pointer (the facade builds it) so
     ///      this function stays under via_ir's stack limit. Behaviour + EIP-712 digest are identical
     ///      to passing the arrays individually.
+    /// @param proposalId The co-signed proposal to edit.
+    /// @param proposerSignatures Re-signatures from every original signer (same set, same order).
+    /// @param txs The new action arrays (targets/values/signatures/calldatas) bundled.
+    /// @param description The new proposal description.
+    /// @param updateMessage A human-readable note describing the edit.
     function updateProposalBySigs(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -366,6 +417,14 @@ library ShwounsDAOSignatures {
     /// @notice Compute the EIP-712 digest a signer signs for a proposal. Off-chain UIs call this
     ///         to build the signing payload. Takes the `proposer` (the address that will submit
     ///         proposeBySigs) and the signer's `expirationTimestamp`, both bound into the digest.
+    /// @param proposer The address that will submit proposeBySigs (bound into the digest).
+    /// @param targets The action target addresses.
+    /// @param values The ETH value for each action.
+    /// @param signatures The function signature strings for each action.
+    /// @param calldatas The calldata (or args) for each action.
+    /// @param description The proposal description.
+    /// @param expirationTimestamp The signer's signature expiry (bound into the digest).
+    /// @return The EIP-712 typed-data digest to sign.
     function proposalDigest(
         ShwounsDAOTypes.Storage storage ds,
         address proposer,

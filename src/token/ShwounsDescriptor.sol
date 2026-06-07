@@ -23,11 +23,16 @@ contract ShwounsDescriptor is IShwounsDescriptor, GovernedOwnable {
     // https://creativecommons.org/publicdomain/zero/1.0/legalcode.txt
     bytes32 constant COPYRIGHT_CC0_1_0_UNIVERSAL_LICENSE = 0xa2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499;
 
+    /// @notice The art storage contract this descriptor reads trait images/palettes from.
     IShwounsArt public art;
+    /// @notice The SVG renderer used to compose trait images into an SVG.
     ISVGRenderer public renderer;
 
+    /// @inheritdoc IShwounsDescriptor
     bool public override arePartsLocked;
+    /// @inheritdoc IShwounsDescriptor
     bool public override isDataURIEnabled = true;
+    /// @inheritdoc IShwounsDescriptor
     string public override baseURI;
 
     modifier whenPartsNotLocked() {
@@ -42,119 +47,151 @@ contract ShwounsDescriptor is IShwounsDescriptor, GovernedOwnable {
         renderer = _renderer;
     }
 
+    /// @notice Point the descriptor at a new art contract. Owner only, until parts are locked.
+    /// @param _art The new art storage contract.
     function setArt(IShwounsArt _art) external onlyOwner whenPartsNotLocked {
         art = _art;
         emit ArtUpdated(_art);
     }
 
+    /// @notice Set the SVG renderer. Owner only.
+    /// @param _renderer The new SVG renderer.
     function setRenderer(ISVGRenderer _renderer) external onlyOwner {
         renderer = _renderer;
         emit RendererUpdated(_renderer);
     }
 
+    /// @notice Re-point the art contract's `descriptor` (its sole authorized writer). Owner only,
+    ///         until parts are locked.
     /// @dev M-06: gated by whenPartsNotLocked. Without it, after lockParts() the owner could hand
     ///      Art authority to a fresh unlocked descriptor and mutate palettes/traits — bypassing the
     ///      lock. Authority-changing Art ops must respect the parts lock.
+    /// @param descriptor The new descriptor address for the art contract.
     function setArtDescriptor(address descriptor) external onlyOwner whenPartsNotLocked {
         art.setDescriptor(descriptor);
     }
 
+    /// @notice Set the art contract's inflator. Owner only, until parts are locked.
+    /// @param inflator The new inflator for the art contract.
     function setArtInflator(IInflator inflator) external onlyOwner whenPartsNotLocked {
         art.setInflator(inflator);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function backgroundCount() public view override returns (uint256) {
         return art.backgroundCount();
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function bodyCount() public view override returns (uint256) {
         return art.bodyCount();
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function accessoryCount() public view override returns (uint256) {
         return art.accessoryCount();
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function headCount() public view override returns (uint256) {
         return art.headCount();
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function addManyBackgrounds(string[] calldata _backgrounds) external override onlyOwner whenPartsNotLocked {
         art.addManyBackgrounds(_backgrounds);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function addBackground(string calldata _background) external override onlyOwner whenPartsNotLocked {
         art.addBackground(_background);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function setPalette(uint8 paletteIndex, bytes calldata palette) external override onlyOwner whenPartsNotLocked {
         art.setPalette(paletteIndex, palette);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function addBodies(bytes calldata encodedCompressed, uint80 decompressedLength, uint16 imageCount) external override onlyOwner whenPartsNotLocked {
         art.addBodies(encodedCompressed, decompressedLength, imageCount);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function addAccessories(bytes calldata encodedCompressed, uint80 decompressedLength, uint16 imageCount) external override onlyOwner whenPartsNotLocked {
         art.addAccessories(encodedCompressed, decompressedLength, imageCount);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function addHeads(bytes calldata encodedCompressed, uint80 decompressedLength, uint16 imageCount) external override onlyOwner whenPartsNotLocked {
         art.addHeads(encodedCompressed, decompressedLength, imageCount);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function setPalettePointer(uint8 paletteIndex, address pointer) external override onlyOwner whenPartsNotLocked {
         art.setPalettePointer(paletteIndex, pointer);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function addBodiesFromPointer(address pointer, uint80 decompressedLength, uint16 imageCount) external override onlyOwner whenPartsNotLocked {
         art.addBodiesFromPointer(pointer, decompressedLength, imageCount);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function addAccessoriesFromPointer(address pointer, uint80 decompressedLength, uint16 imageCount) external override onlyOwner whenPartsNotLocked {
         art.addAccessoriesFromPointer(pointer, decompressedLength, imageCount);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function addHeadsFromPointer(address pointer, uint80 decompressedLength, uint16 imageCount) external override onlyOwner whenPartsNotLocked {
         art.addHeadsFromPointer(pointer, decompressedLength, imageCount);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function backgrounds(uint256 index) public view override returns (string memory) {
         return art.backgrounds(index);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function heads(uint256 index) public view override returns (bytes memory) {
         return art.heads(index);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function bodies(uint256 index) public view override returns (bytes memory) {
         return art.bodies(index);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function accessories(uint256 index) public view override returns (bytes memory) {
         return art.accessories(index);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function palettes(uint8 index) public view override returns (bytes memory) {
         return art.palettes(index);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function lockParts() external override onlyOwner whenPartsNotLocked {
         arePartsLocked = true;
         emit PartsLocked();
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function toggleDataURIEnabled() external override onlyOwner {
         bool enabled = !isDataURIEnabled;
         isDataURIEnabled = enabled;
         emit DataURIToggled(enabled);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function setBaseURI(string calldata _baseURI) external override onlyOwner {
         baseURI = _baseURI;
         emit BaseURIUpdated(_baseURI);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function tokenURI(uint256 tokenId, IShwounsSeeder.Seed memory seed) external view override returns (string memory) {
         if (isDataURIEnabled) {
             return dataURI(tokenId, seed);
@@ -162,6 +199,7 @@ contract ShwounsDescriptor is IShwounsDescriptor, GovernedOwnable {
         return string(abi.encodePacked(baseURI, tokenId.toString()));
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function dataURI(uint256 tokenId, IShwounsSeeder.Seed memory seed) public view override returns (string memory) {
         string memory shwounId = tokenId.toString();
         string memory name = string(abi.encodePacked('Shwoun ', shwounId));
@@ -169,6 +207,7 @@ contract ShwounsDescriptor is IShwounsDescriptor, GovernedOwnable {
         return genericDataURI(name, description, seed);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function genericDataURI(
         string memory name,
         string memory description,
@@ -183,6 +222,7 @@ contract ShwounsDescriptor is IShwounsDescriptor, GovernedOwnable {
         return NFTDescriptorV2.constructTokenURI(renderer, params);
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function generateSVGImage(IShwounsSeeder.Seed memory seed) external view override returns (string memory) {
         ISVGRenderer.SVGParams memory params = ISVGRenderer.SVGParams({
             parts: getPartsForSeed(seed),
@@ -192,6 +232,8 @@ contract ShwounsDescriptor is IShwounsDescriptor, GovernedOwnable {
     }
 
     /// @notice Get all Shwoun parts for the passed `seed`. Returns 3 parts (body, accessory, head) — no glasses.
+    /// @param seed The trait seed to resolve into images + palettes.
+    /// @return The renderer parts (body, accessory, head), each with its image bytes and palette.
     function getPartsForSeed(IShwounsSeeder.Seed memory seed) public view returns (ISVGRenderer.Part[] memory) {
         bytes memory body = art.bodies(seed.body);
         bytes memory accessory = art.accessories(seed.accessory);
@@ -208,36 +250,42 @@ contract ShwounsDescriptor is IShwounsDescriptor, GovernedOwnable {
         return art.palettes(uint8(part[0]));
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function updateAccessories(bytes calldata encodedCompressed, uint80 decompressedLength, uint16 imageCount) external override onlyOwner whenPartsNotLocked {
         uint256 originalCount = accessoryCount();
         art.updateAccessories(encodedCompressed, decompressedLength, imageCount);
         require(originalCount == accessoryCount(), 'Image count must remain the same');
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function updateBodies(bytes calldata encodedCompressed, uint80 decompressedLength, uint16 imageCount) external override onlyOwner whenPartsNotLocked {
         uint256 originalCount = bodyCount();
         art.updateBodies(encodedCompressed, decompressedLength, imageCount);
         require(originalCount == bodyCount(), 'Image count must remain the same');
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function updateHeads(bytes calldata encodedCompressed, uint80 decompressedLength, uint16 imageCount) external override onlyOwner whenPartsNotLocked {
         uint256 originalCount = headCount();
         art.updateHeads(encodedCompressed, decompressedLength, imageCount);
         require(originalCount == headCount(), 'Image count must remain the same');
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function updateAccessoriesFromPointer(address pointer, uint80 decompressedLength, uint16 imageCount) external override onlyOwner whenPartsNotLocked {
         uint256 originalCount = accessoryCount();
         art.updateAccessoriesFromPointer(pointer, decompressedLength, imageCount);
         require(originalCount == accessoryCount(), 'Image count must remain the same');
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function updateBodiesFromPointer(address pointer, uint80 decompressedLength, uint16 imageCount) external override onlyOwner whenPartsNotLocked {
         uint256 originalCount = bodyCount();
         art.updateBodiesFromPointer(pointer, decompressedLength, imageCount);
         require(originalCount == bodyCount(), 'Image count must remain the same');
     }
 
+    /// @inheritdoc IShwounsDescriptor
     function updateHeadsFromPointer(address pointer, uint80 decompressedLength, uint16 imageCount) external override onlyOwner whenPartsNotLocked {
         uint256 originalCount = headCount();
         art.updateHeadsFromPointer(pointer, decompressedLength, imageCount);

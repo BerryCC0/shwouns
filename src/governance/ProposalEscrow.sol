@@ -38,13 +38,42 @@ import { ERC1155Holder } from "@openzeppelin/contracts/token/ERC1155/utils/ERC11
 /// @notice The slim surface DAOLogic drives. Kept minimal so the library can call it without
 ///         importing the full contract.
 interface IProposalEscrow {
+    /// @notice The DAOLogic proxy that is the sole driver of this escrow.
+    /// @return The DAOLogic proxy address (baked in as an immutable on the implementation).
     function daoLogic() external view returns (address);
+
+    /// @notice The immutable sink (GovernanceRewards) that residual sweeps send to.
+    /// @return The residual-sink address.
     function residualSink() external view returns (address);
+
+    /// @notice Execute the proposal's actions from this escrow's own identity and balance.
+    /// @param targets The action target addresses.
+    /// @param values The ETH value to send with each action.
+    /// @param calldatas The calldata for each action.
     function execute(address[] calldata targets, uint256[] calldata values, bytes[] calldata calldatas) external;
+
+    /// @notice Pay a constrained asset/amount to a recipient (used by DAOLogic's refund path).
+    /// @param asset The asset to transfer; `address(0)` for native ETH.
+    /// @param to The recipient (DAOLogic derives it from the contributing vault, never caller-supplied).
+    /// @param amount The amount to transfer.
     function payOut(address asset, address to, uint256 amount) external;
+
+    /// @notice Sweep the escrow's entire ETH balance to the immutable residual sink.
     function sweepETHToSink() external;
+
+    /// @notice Sweep the escrow's entire balance of an ERC-20 to the residual sink.
+    /// @param token The ERC-20 to sweep.
     function sweepERC20ToSink(address token) external;
+
+    /// @notice Sweep one ERC-721 to the residual sink.
+    /// @param token The ERC-721 collection.
+    /// @param tokenId The token id to sweep.
     function sweepERC721ToSink(address token, uint256 tokenId) external;
+
+    /// @notice Sweep an ERC-1155 balance to the residual sink.
+    /// @param token The ERC-1155 collection.
+    /// @param id The token id.
+    /// @param amount The amount to sweep.
     function sweepERC1155ToSink(address token, uint256 id, uint256 amount) external;
 }
 
@@ -59,10 +88,15 @@ contract ProposalEscrow is ERC721Holder, ERC1155Holder {
     ///         terminal-gated rescue path (added in §A8) go here and nowhere else.
     address public immutable residualSink;
 
+    /// @notice Thrown when any entry point is called by an address other than `daoLogic`.
     error NotDAOLogic();
+    /// @notice Thrown when `execute` is given targets/values/calldatas arrays of unequal length.
     error LengthMismatch();
+    /// @notice Thrown when action `index` reverts without bubbling revert data.
     error ExecutionFailed(uint256 index);
+    /// @notice Thrown when a native-ETH transfer (payOut / sweepETHToSink) fails.
     error ETHTransferFailed();
+    /// @notice Thrown when the constructor is given a zero `daoLogic` or `residualSink`.
     error ZeroAddress();
 
     constructor(address _daoLogic, address _residualSink) {
@@ -86,6 +120,9 @@ contract ProposalEscrow is ERC721Holder, ERC1155Holder {
     ///         returns. Bubbles the first failing action's revert data — DAOLogic must NOT catch it
     ///         — so a failed action atomically rolls back the whole attempt and finalize stays
     ///         retryable.
+    /// @param targets The action target addresses (one per action).
+    /// @param values The ETH value sent with each action (drawn from this escrow's balance).
+    /// @param calldatas The calldata for each action.
     function execute(
         address[] calldata targets,
         uint256[] calldata values,
@@ -110,6 +147,9 @@ contract ProposalEscrow is ERC721Holder, ERC1155Holder {
     ///         caller-supplied. Use `address(0)` for native ETH.
     /// @dev A plain constrained transfer — never an arbitrary call, and it never touches DAOLogic's
     ///      executor authentication.
+    /// @param asset The asset to transfer; `address(0)` for native ETH.
+    /// @param to The recipient (the contributing vault, supplied by DAOLogic).
+    /// @param amount The amount to transfer; a zero amount is a no-op.
     function payOut(address asset, address to, uint256 amount) external onlyDAOLogic {
         if (amount == 0) return;
         if (asset == address(0)) {
@@ -129,6 +169,7 @@ contract ProposalEscrow is ERC721Holder, ERC1155Holder {
     // supplied recipient). They never make an arbitrary call and never touch executor authentication.
     // -------------------------------------------------------------------------
 
+    /// @notice Sweep this escrow's entire ETH balance to the residual sink. No-op if zero.
     function sweepETHToSink() external onlyDAOLogic {
         uint256 bal = address(this).balance;
         if (bal == 0) return;
@@ -136,16 +177,25 @@ contract ProposalEscrow is ERC721Holder, ERC1155Holder {
         if (!ok) revert ETHTransferFailed();
     }
 
+    /// @notice Sweep this escrow's entire balance of an ERC-20 to the residual sink. No-op if zero.
+    /// @param token The ERC-20 to sweep.
     function sweepERC20ToSink(address token) external onlyDAOLogic {
         uint256 bal = IERC20(token).balanceOf(address(this));
         if (bal == 0) return;
         IERC20(token).safeTransfer(residualSink, bal);
     }
 
+    /// @notice Sweep one ERC-721 held by this escrow to the residual sink.
+    /// @param token The ERC-721 collection.
+    /// @param tokenId The token id to sweep.
     function sweepERC721ToSink(address token, uint256 tokenId) external onlyDAOLogic {
         IERC721(token).safeTransferFrom(address(this), residualSink, tokenId);
     }
 
+    /// @notice Sweep an ERC-1155 balance held by this escrow to the residual sink.
+    /// @param token The ERC-1155 collection.
+    /// @param id The token id.
+    /// @param amount The amount to sweep.
     function sweepERC1155ToSink(address token, uint256 id, uint256 amount) external onlyDAOLogic {
         IERC1155(token).safeTransferFrom(address(this), residualSink, id, amount, "");
     }

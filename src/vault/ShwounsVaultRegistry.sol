@@ -42,11 +42,13 @@ contract ShwounsVaultRegistry is IShwounsVaultRegistry, GovernedOwnable {
     /// @notice The ShwounsVault implementation contract. Settable once via setVaultImplementation,
     ///         then locked. All vaults are ERC-1167 proxies pointing at this impl.
     address public vaultImplementation;
+    /// @notice True once `vaultImplementation` has been set, after which it can never change.
     bool public vaultImplementationLocked;
 
     /// @notice The Shwouns DAOLogic. Vaults gate pullProRata on this address. Settable once,
     ///         then locked.
     address public daoLogic;
+    /// @notice True once `daoLogic` has been set, after which it can never change.
     bool public daoLogicLocked;
 
     /// @notice Token IDs whose vaults have been marked active (i.e., received a deposit).
@@ -54,15 +56,24 @@ contract ShwounsVaultRegistry is IShwounsVaultRegistry, GovernedOwnable {
     ///         DAOLogic must re-check current balances at queue time.
     EnumerableSet.UintSet private _activeVaults;
 
+    /// @notice Emitted once when the vault implementation is set and locked.
     event VaultImplementationSet(address indexed impl);
+    /// @notice Emitted once when the DAOLogic reference is set and locked.
     event DAOLogicSet(address indexed daoLogic);
+    /// @notice Emitted the first time a token's vault enters the active set.
     event VaultMarkedActive(uint256 indexed tokenId);
+    /// @notice Reserved for active-set removal; never emitted (the set is append-only).
     event VaultMarkedInactive(uint256 indexed tokenId);
 
+    /// @notice Thrown when a setter or the constructor is given a zero address.
     error InvalidAddress();
+    /// @notice Thrown when a one-time setter is called after it has already been locked.
     error AlreadyLocked();
+    /// @notice Thrown when `markActive` is called by an address other than the token's own vault.
     error NotAuthorizedVault();
+    /// @notice Thrown when `vaultOf`/`createVaultFor` is called before the implementation is set.
     error VaultImplementationNotSet();
+    /// @notice Thrown when a vault is requested for a token id that does not exist (C-03 gate).
     error TokenDoesNotExist();
 
     constructor(address _shwounsToken, address _governanceAuth) GovernedOwnable(_governanceAuth) {
@@ -75,6 +86,7 @@ contract ShwounsVaultRegistry is IShwounsVaultRegistry, GovernedOwnable {
     // -------------------------------------------------------------------------
 
     /// @notice Set the vault implementation address. Callable once.
+    /// @param impl The ShwounsVault implementation address; locked permanently after this call.
     function setVaultImplementation(address impl) external onlyOwner {
         if (vaultImplementationLocked) revert AlreadyLocked();
         if (impl == address(0)) revert InvalidAddress();
@@ -84,6 +96,7 @@ contract ShwounsVaultRegistry is IShwounsVaultRegistry, GovernedOwnable {
     }
 
     /// @notice Set the DAOLogic address. Callable once.
+    /// @param _daoLogic The DAOLogic address vaults will gate `pullProRata` on; locked after this call.
     function setDAOLogic(address _daoLogic) external onlyOwner {
         if (daoLogicLocked) revert AlreadyLocked();
         if (_daoLogic == address(0)) revert InvalidAddress();
@@ -98,6 +111,8 @@ contract ShwounsVaultRegistry is IShwounsVaultRegistry, GovernedOwnable {
 
     /// @notice Compute the deterministic vault address for a token ID. Works before the vault
     ///         is actually deployed — the address is determined by the CREATE2 formula.
+    /// @param tokenId The Shwoun token id.
+    /// @return The deterministic vault address.
     function vaultOf(uint256 tokenId) public view returns (address) {
         if (vaultImplementation == address(0)) revert VaultImplementationNotSet();
         return IERC6551Registry(CANONICAL_ERC6551_REGISTRY).account(
@@ -113,6 +128,8 @@ contract ShwounsVaultRegistry is IShwounsVaultRegistry, GovernedOwnable {
     ///         deployed. Called by ShwounsToken on mint; can also be called by anyone post-mint.
     /// @dev C-03: the bound token MUST exist. Without this gate anyone could deploy vaults for
     ///      unminted token IDs and inflate the active set until proposal queueing exceeds block gas.
+    /// @param tokenId The Shwoun token id.
+    /// @return The vault address (existing if already deployed).
     function createVaultFor(uint256 tokenId) external returns (address) {
         if (vaultImplementation == address(0)) revert VaultImplementationNotSet();
         _requireTokenExists(tokenId);
@@ -157,6 +174,8 @@ contract ShwounsVaultRegistry is IShwounsVaultRegistry, GovernedOwnable {
     ///      Retained as a no-op for vault-callback / interface compatibility.
     function markPossiblyInactive(uint256) external {}
 
+    /// @dev Auth gate for `markActive`: the caller must be the token's OWN deterministic vault
+    ///      address, so a vault can only mark itself (not another token) into the active set.
     function _requireCallerIsVault(uint256 tokenId) internal view {
         if (msg.sender != vaultOf(tokenId)) revert NotAuthorizedVault();
     }

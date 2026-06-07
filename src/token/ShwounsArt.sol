@@ -57,12 +57,14 @@ contract ShwounsArt is IShwounsArt {
     // Descriptor + Inflator setters
     // -------------------------------------------------------------------------
 
+    /// @inheritdoc IShwounsArt
     function setDescriptor(address _descriptor) external override onlyDescriptor {
         address oldDescriptor = descriptor;
         descriptor = _descriptor;
         emit DescriptorUpdated(oldDescriptor, descriptor);
     }
 
+    /// @inheritdoc IShwounsArt
     function setInflator(IInflator _inflator) external override onlyDescriptor {
         address oldInflator = address(inflator);
         inflator = _inflator;
@@ -73,14 +75,18 @@ contract ShwounsArt is IShwounsArt {
     // Trait getters (explicit because Solidity auto-getters don't return structs cleanly)
     // -------------------------------------------------------------------------
 
+    /// @inheritdoc IShwounsArt
     function getBodiesTrait() external view override returns (Trait memory) { return bodiesTrait; }
+    /// @inheritdoc IShwounsArt
     function getAccessoriesTrait() external view override returns (Trait memory) { return accessoriesTrait; }
+    /// @inheritdoc IShwounsArt
     function getHeadsTrait() external view override returns (Trait memory) { return headsTrait; }
 
     // -------------------------------------------------------------------------
     // Background management
     // -------------------------------------------------------------------------
 
+    /// @inheritdoc IShwounsArt
     function addManyBackgrounds(string[] calldata _backgrounds) external override onlyDescriptor {
         for (uint256 i = 0; i < _backgrounds.length; i++) {
             _addBackground(_backgrounds[i]);
@@ -88,6 +94,7 @@ contract ShwounsArt is IShwounsArt {
         emit BackgroundsAdded(_backgrounds.length);
     }
 
+    /// @inheritdoc IShwounsArt
     function addBackground(string calldata _background) external override onlyDescriptor {
         _addBackground(_background);
         emit BackgroundsAdded(1);
@@ -101,6 +108,7 @@ contract ShwounsArt is IShwounsArt {
     // Palette management
     // -------------------------------------------------------------------------
 
+    /// @inheritdoc IShwounsArt
     function setPalette(uint8 paletteIndex, bytes calldata palette) external override onlyDescriptor {
         if (palette.length == 0) revert EmptyPalette();
         if (palette.length % 3 != 0 || palette.length > 768) revert BadPaletteLength();
@@ -108,11 +116,13 @@ contract ShwounsArt is IShwounsArt {
         emit PaletteSet(paletteIndex);
     }
 
+    /// @inheritdoc IShwounsArt
     function setPalettePointer(uint8 paletteIndex, address pointer) external override onlyDescriptor {
         palettesPointers[paletteIndex] = pointer;
         emit PaletteSet(paletteIndex);
     }
 
+    /// @inheritdoc IShwounsArt
     function palettes(uint8 paletteIndex) public view override returns (bytes memory) {
         address pointer = palettesPointers[paletteIndex];
         if (pointer == address(0)) revert PaletteNotFound();
@@ -123,6 +133,7 @@ contract ShwounsArt is IShwounsArt {
     // Add trait pages (bodies / accessories / heads)
     // -------------------------------------------------------------------------
 
+    /// @inheritdoc IShwounsArt
     function addBodies(
         bytes calldata encodedCompressed,
         uint80 decompressedLength,
@@ -132,6 +143,7 @@ contract ShwounsArt is IShwounsArt {
         emit BodiesAdded(imageCount);
     }
 
+    /// @inheritdoc IShwounsArt
     function addAccessories(
         bytes calldata encodedCompressed,
         uint80 decompressedLength,
@@ -141,6 +153,7 @@ contract ShwounsArt is IShwounsArt {
         emit AccessoriesAdded(imageCount);
     }
 
+    /// @inheritdoc IShwounsArt
     function addHeads(
         bytes calldata encodedCompressed,
         uint80 decompressedLength,
@@ -150,6 +163,7 @@ contract ShwounsArt is IShwounsArt {
         emit HeadsAdded(imageCount);
     }
 
+    /// @inheritdoc IShwounsArt
     function addBodiesFromPointer(
         address pointer,
         uint80 decompressedLength,
@@ -159,6 +173,7 @@ contract ShwounsArt is IShwounsArt {
         emit BodiesAdded(imageCount);
     }
 
+    /// @inheritdoc IShwounsArt
     function addAccessoriesFromPointer(
         address pointer,
         uint80 decompressedLength,
@@ -168,6 +183,7 @@ contract ShwounsArt is IShwounsArt {
         emit AccessoriesAdded(imageCount);
     }
 
+    /// @inheritdoc IShwounsArt
     function addHeadsFromPointer(
         address pointer,
         uint80 decompressedLength,
@@ -181,6 +197,7 @@ contract ShwounsArt is IShwounsArt {
     // Update (replace) trait pages
     // -------------------------------------------------------------------------
 
+    /// @inheritdoc IShwounsArt
     function updateBodies(
         bytes calldata encodedCompressed,
         uint80 decompressedLength,
@@ -190,6 +207,7 @@ contract ShwounsArt is IShwounsArt {
         emit BodiesUpdated(imageCount);
     }
 
+    /// @inheritdoc IShwounsArt
     function updateAccessories(
         bytes calldata encodedCompressed,
         uint80 decompressedLength,
@@ -199,6 +217,7 @@ contract ShwounsArt is IShwounsArt {
         emit AccessoriesUpdated(imageCount);
     }
 
+    /// @inheritdoc IShwounsArt
     function updateHeads(
         bytes calldata encodedCompressed,
         uint80 decompressedLength,
@@ -208,6 +227,7 @@ contract ShwounsArt is IShwounsArt {
         emit HeadsUpdated(imageCount);
     }
 
+    /// @inheritdoc IShwounsArt
     function updateBodiesFromPointer(
         address pointer,
         uint80 decompressedLength,
@@ -217,6 +237,7 @@ contract ShwounsArt is IShwounsArt {
         emit BodiesUpdated(imageCount);
     }
 
+    /// @inheritdoc IShwounsArt
     function updateAccessoriesFromPointer(
         address pointer,
         uint80 decompressedLength,
@@ -226,6 +247,7 @@ contract ShwounsArt is IShwounsArt {
         emit AccessoriesUpdated(imageCount);
     }
 
+    /// @inheritdoc IShwounsArt
     function updateHeadsFromPointer(
         address pointer,
         uint80 decompressedLength,
@@ -239,19 +261,26 @@ contract ShwounsArt is IShwounsArt {
     // Counts + image reads
     // -------------------------------------------------------------------------
 
+    /// @inheritdoc IShwounsArt
     function backgroundCount() external view override returns (uint256) { return backgrounds.length; }
+    /// @inheritdoc IShwounsArt
     function bodyCount() external view override returns (uint256) { return bodiesTrait.storedImagesCount; }
+    /// @inheritdoc IShwounsArt
     function accessoryCount() external view override returns (uint256) { return accessoriesTrait.storedImagesCount; }
+    /// @inheritdoc IShwounsArt
     function headCount() external view override returns (uint256) { return headsTrait.storedImagesCount; }
 
+    /// @inheritdoc IShwounsArt
     function bodies(uint256 index) public view override returns (bytes memory) {
         return imageByIndex(bodiesTrait, index);
     }
 
+    /// @inheritdoc IShwounsArt
     function accessories(uint256 index) public view override returns (bytes memory) {
         return imageByIndex(accessoriesTrait, index);
     }
 
+    /// @inheritdoc IShwounsArt
     function heads(uint256 index) public view override returns (bytes memory) {
         return imageByIndex(headsTrait, index);
     }

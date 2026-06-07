@@ -38,39 +38,73 @@ library ShwounsDAOProposals {
     // Errors
     // -------------------------------------------------------------------------
 
+    /// @notice Thrown when the proposer's votes do not exceed the proposal threshold.
     error ProposerVotesBelowThreshold();
+    /// @notice Thrown when a proposal has zero actions.
     error InvalidProposalActions();
+    /// @notice Thrown when a proposal's action arrays differ in length.
     error ActionsArrayLengthMismatch();
+    /// @notice Thrown when a proposal has more than 10 actions.
     error TooManyActions();
+    /// @notice Thrown when the proposer already has a live proposal in flight.
     error ProposerAlreadyHasLiveProposal();
+    /// @notice Thrown when a voter tries to vote twice on the same proposal.
     error CannotVoteTwice();
+    /// @notice Thrown when a vote `support` value is greater than 2.
     error InvalidSupportValue();
+    /// @notice Reserved: thrown when voting has closed (legacy guard).
     error VotingClosed();
+    /// @notice Thrown when casting a vote outside the Active/ObjectionPeriod window.
     error VotingNotOpen();
+    /// @notice Thrown when referencing a proposal id that was never created.
     error ProposalDoesNotExist();
+    /// @notice Reserved: thrown when a proposal was already canceled (legacy guard).
     error ProposalAlreadyCanceled();
+    /// @notice Thrown when a non-proposer/non-signer cancels a proposal still above threshold.
     error ProposerAboveThresholdAndNotVetoer();
+    /// @notice Thrown when an action is attempted from an invalid proposal state.
     error InvalidProposalState();
+    /// @notice Reserved: thrown when a proposal was already queued/settled (legacy guard).
     error AlreadyQueuedOrSettled();
+    /// @notice Reserved: thrown when the snapshot phase has not started (legacy guard).
     error SnapshotPhaseNotStarted();
+    /// @notice Reserved: thrown when the snapshot phase is incomplete (legacy guard).
     error SnapshotPhaseNotComplete();
+    /// @notice Reserved: thrown when the collect phase is incomplete (legacy guard).
     error CollectPhaseNotComplete();
+    /// @notice Reserved: thrown when a vault was already collected (legacy guard).
     error VaultAlreadyCollected();
+    /// @notice Reserved: thrown when a vault was not snapshotted (legacy guard).
     error VaultNotSnapshotted();
+    /// @notice Thrown when finalize is attempted but collected funds are below the requested amount.
     error InsufficientCollected();
+    /// @notice Thrown when a top-up is zero, for an unrequested asset, or exceeds the shortfall.
     error InvalidTopUp();
+    /// @notice Reserved: thrown when caller is not a Shwouns holder (legacy guard).
     error NotShwounsHolder();
+    /// @notice Reserved: thrown when caller is neither proposer nor vetoer (legacy guard).
     error OnlyProposerOrVetoer();
+    /// @notice Thrown when a vetoer-only action is called by another address.
     error OnlyVetoer();
+    /// @notice Reserved: generic unauthorized guard.
     error NotAuthorized();
+    /// @notice Thrown when a non-Against vote is cast during the objection period.
     error OnlyAgainstVotesDuringObjection();
+    /// @notice Thrown when finalize/refund/rescue runs while another finalize is in flight.
     error AlreadyExecuting();
+    /// @notice Thrown when queue is attempted before the ProposalEscrow implementation is set.
     error EscrowImplNotSet();
+    /// @notice Thrown when rescue is attempted on a non-terminal proposal.
     error NotTerminal();
+    /// @notice Thrown when the escrow at the predicted address is not the expected clone codehash.
     error EscrowCodehashMismatch();
+    /// @notice Thrown when a DAOLogic self-upgrade action is not the proposal's final action.
     error UpgradeMustBeLastAction();
+    /// @notice Thrown when a proposal requests a non-allowlisted ERC-20 (M-04).
     error AssetNotFundable();
+    /// @notice Thrown when recordSnapshot runs before the queue-time vault-set freeze completes.
     error FreezeNotComplete();
+    /// @notice Thrown when freezeVaults is called after the freeze is already complete.
     error FreezeAlreadyComplete();
 
     /// @dev M-05: max active vaults frozen within queue() itself. The remainder (for a set larger
@@ -84,6 +118,7 @@ library ShwounsDAOProposals {
     // Re-emit events to enable indexer simplicity (library events bubble up)
     // -------------------------------------------------------------------------
 
+    /// @notice Emitted when a proposal is created.
     event ProposalCreated(
         uint256 id,
         address proposer,
@@ -95,22 +130,41 @@ library ShwounsDAOProposals {
         uint256 endBlock,
         string description
     );
+    /// @notice Emitted on each vote cast (For/Against/Abstain) with the voter's weight and reason.
     event VoteCast(address indexed voter, uint256 proposalId, uint8 support, uint256 votes, string reason);
+    /// @notice Emitted when a proposal is canceled.
     event ProposalCanceled(uint256 id);
+    /// @notice Emitted when a proposal is queued (escrow deployed, vault-set freeze begun).
     event ProposalQueued(uint256 id);
+    /// @notice Emitted once per asset when the snapshot phase completes, with the total snapshotted.
     event ProposalSnapshotted(uint256 indexed id, address indexed asset, uint256 totalSnapshotBalance);
+    /// @notice Emitted when the collect phase completes for a proposal.
     event ProposalCollected(uint256 indexed id);
+    /// @notice Emitted when a proposal's actions execute successfully (terminal Executed).
     event ProposalExecuted(uint256 id);
+    /// @notice Emitted when a proposal is vetoed.
     event ProposalVetoed(uint256 id);
+    /// @notice Emitted per (proposal, vault, asset) when a non-zero balance is recorded at snapshot.
     event VaultSnapshotted(uint256 indexed proposalId, uint256 indexed shwounId, address indexed asset, uint256 balance);
+    /// @notice Emitted per (proposal, vault, asset) when an amount is actually pulled at collect.
     event AssetCollectedFromVault(uint256 indexed proposalId, uint256 indexed shwounId, address indexed asset, uint256 amount);
+    /// @notice Emitted when a vault's collect-time balance is below its snapshot share (a shortfall).
     event ShortfallRecorded(uint256 indexed proposalId, uint256 indexed shwounId, address indexed asset, uint256 missingAmount);
+    /// @notice Emitted when a last-minute For-flip starts the objection period.
     event ProposalObjectionPeriodSet(uint256 indexed proposalId, uint256 objectionPeriodEndBlock);
 
     // =========================================================================
     // Propose
     // =========================================================================
 
+    /// @notice Create a proposal. The caller must hold votes strictly exceeding the proposal
+    ///         threshold and have no other live proposal. Opens an Updatable window, then voting.
+    /// @param targets The action target addresses.
+    /// @param values The ETH value for each action.
+    /// @param signatures The function signature strings for each action (GovernorBravo form).
+    /// @param calldatas The calldata (or args) for each action.
+    /// @param description The proposal description.
+    /// @return proposalId The id of the created proposal.
     function propose(
         ShwounsDAOTypes.Storage storage ds,
         address[] memory targets,
@@ -141,6 +195,9 @@ library ShwounsDAOProposals {
         );
     }
 
+    /// @dev Validate action-array shape (equal lengths, 1..10 actions) AND that the proposer's prior
+    ///      votes STRICTLY exceed the proposal threshold (`<=` reverts — matching Nouns — so a
+    ///      threshold that rounds to 0 at low supply can't let a zero-vote address propose).
     function _validateActionsAndThreshold(
         ShwounsDAOTypes.Storage storage ds,
         address[] memory targets,
@@ -163,6 +220,8 @@ library ShwounsDAOProposals {
         }
     }
 
+    /// @dev Revert if msg.sender already has a proposal in flight (Active/Pending/ObjectionPeriod/
+    ///      Updatable) — at most one live proposal per proposer.
     function _enforceOneLiveProposal(ShwounsDAOTypes.Storage storage ds) internal view {
         uint256 latestProposalId = ds.latestProposalIds[msg.sender];
         if (latestProposalId == 0) return;
@@ -177,9 +236,16 @@ library ShwounsDAOProposals {
         }
     }
 
+    /// @notice Internal proposal-writer exposed `public` only for cross-library linking (A3 split);
+    ///         not intended for external callers.
     /// @dev `public` so the ShwounsDAOSignatures library can reach it cross-library (A3 split).
     ///      In-library callers (propose) still reach it as a same-library JUMP, so the hot propose
     ///      path is unaffected; only the cold proposeBySigs path pays the delegatecall hop.
+    /// @param proposalId The id to write.
+    /// @param targets The action target addresses.
+    /// @param values The ETH value for each action.
+    /// @param signatures The function signature strings for each action.
+    /// @param calldatas The calldata (or args) for each action.
     function _writeProposal(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -217,6 +283,12 @@ library ShwounsDAOProposals {
     ///      ProposalCreated emit is too stack-heavy to inline into proposeBySigs under via_ir, but
     ///      compiles cleanly here (same shape as propose). `msg.sender` is preserved across the
     ///      delegatecall, so the emitted proposer is the original caller.
+    /// @param targets The action target addresses.
+    /// @param values The ETH value for each action.
+    /// @param signatures The function signature strings for each action.
+    /// @param calldatas The calldata (or args) for each action.
+    /// @param description The proposal description.
+    /// @return proposalId The id of the created proposal.
     function createForSigners(
         ShwounsDAOTypes.Storage storage ds,
         address[] memory targets,
@@ -239,6 +311,9 @@ library ShwounsDAOProposals {
     // Vote
     // =========================================================================
 
+    /// @notice Cast a vote on a proposal.
+    /// @param proposalId The proposal to vote on.
+    /// @param support The vote: 0=Against, 1=For, 2=Abstain.
     function castVote(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -247,6 +322,10 @@ library ShwounsDAOProposals {
         _castVoteInternal(ds, msg.sender, proposalId, support, "");
     }
 
+    /// @notice Cast a vote on a proposal with an attached reason string.
+    /// @param proposalId The proposal to vote on.
+    /// @param support The vote: 0=Against, 1=For, 2=Abstain.
+    /// @param reason A free-text reason emitted in the VoteCast event.
     function castVoteWithReason(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -260,6 +339,11 @@ library ShwounsDAOProposals {
     ///         signer is the voter. Routes through the same internal path as castVote so the
     ///         objection-period and dynamic-quorum logic apply identically. ECDSA-only (Nouns
     ///         parity for ballots).
+    /// @param proposalId The proposal to vote on.
+    /// @param support The vote: 0=Against, 1=For, 2=Abstain.
+    /// @param v The ECDSA signature `v` component.
+    /// @param r The ECDSA signature `r` component.
+    /// @param s The ECDSA signature `s` component.
     function castVoteBySig(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -277,6 +361,10 @@ library ShwounsDAOProposals {
         _castVoteInternal(ds, voter, proposalId, support, "");
     }
 
+    /// @dev Shared vote path for all cast variants. Allows any support while Active; only Against
+    ///      during ObjectionPeriod; reverts otherwise. Records the receipt at the proposal's
+    ///      start-block voting weight (no double-voting), tallies it, and — only from the Active
+    ///      phase on a For vote — may trigger the objection period.
     function _castVoteInternal(
         ShwounsDAOTypes.Storage storage ds,
         address voter,
@@ -317,6 +405,10 @@ library ShwounsDAOProposals {
         }
     }
 
+    /// @dev Start the objection period iff a For vote lands in the last-minute window AND the
+    ///      proposal is currently passing (For > Against AND For >= quorum). Extends voting by
+    ///      objectionPeriodDurationInBlocks, during which only Against votes are accepted. No-op if
+    ///      already started, the window is disabled, or the conditions aren't met.
     function _maybeStartObjectionPeriod(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId
@@ -336,6 +428,9 @@ library ShwounsDAOProposals {
     // State
     // =========================================================================
 
+    /// @notice The current lifecycle state of a proposal (see ProposalState).
+    /// @param proposalId The proposal to query.
+    /// @return The computed proposal state.
     function state(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId
@@ -392,6 +487,8 @@ library ShwounsDAOProposals {
         return ShwounsDAOTypes.ProposalState.Succeeded;
     }
 
+    /// @dev True once queued, the snapshot phase is finished, and every snapshotted vault has been
+    ///      collected. Zero-snapshot proposals (empty snapshottedVaults) complete immediately (C3).
     function _isCollectComplete(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId
@@ -407,6 +504,8 @@ library ShwounsDAOProposals {
 
     /// @notice Flat, mapping-free view of a proposal (for indexers/UIs). Includes the current
     ///         dynamic quorum, computed state, signers, and snapshot/collect progress.
+    /// @param proposalId The proposal to query.
+    /// @return c The condensed proposal view.
     function proposals(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId
@@ -441,6 +540,10 @@ library ShwounsDAOProposals {
     // Cancel / Veto
     // =========================================================================
 
+    /// @notice Cancel a proposal. Callable by the proposer/any co-signer at will, or by anyone once
+    ///         the combined proposer+signer voting power has fallen to or below the threshold.
+    ///         Rejected at terminal states and while Executing. Funded proposals route to refund().
+    /// @param proposalId The proposal to cancel.
     function cancel(ShwounsDAOTypes.Storage storage ds, uint256 proposalId) external {
         ShwounsDAOTypes.ProposalState s = state(ds, proposalId);
         // H-01: cancel is NOT blocked after funds move — a funded Canceled proposal routes into the
@@ -478,6 +581,9 @@ library ShwounsDAOProposals {
         emit ProposalCanceled(proposalId);
     }
 
+    /// @notice Veto a proposal (emergency brake). Vetoer only. Rejected at Executed/Executing.
+    ///         Funded proposals route to refund().
+    /// @param proposalId The proposal to veto.
     function veto(ShwounsDAOTypes.Storage storage ds, uint256 proposalId) external {
         if (msg.sender != ds.vetoer) revert OnlyVetoer();
         ShwounsDAOTypes.ProposalState s = state(ds, proposalId);
@@ -496,6 +602,9 @@ library ShwounsDAOProposals {
     // Queue — transitions Succeeded → Queued; locks snapshot target + asset list
     // =========================================================================
 
+    /// @notice Queue a Succeeded proposal: extract its requested assets, validate any self-upgrade is
+    ///         last, deploy its deterministic escrow (CREATE2), and begin freezing the active vault set.
+    /// @param proposalId The Succeeded proposal to queue.
     function queue(ShwounsDAOTypes.Storage storage ds, uint256 proposalId) external {
         if (state(ds, proposalId) != ShwounsDAOTypes.ProposalState.Succeeded) revert InvalidProposalState();
         if (ds.proposalEscrowImplementation == address(0)) revert EscrowImplNotSet();
@@ -548,6 +657,8 @@ library ShwounsDAOProposals {
     /// @notice Page the queue-time vault-set freeze for a set larger than FREEZE_BATCH_AT_QUEUE.
     ///         Copies the next `batchSize` active-vault indices (within [0, snapshotTargetCount))
     ///         into the proposal's frozen list. recordSnapshot reverts until this completes.
+    /// @param proposalId The Queued proposal whose freeze to advance.
+    /// @param batchSize The number of additional vault indices to freeze this call.
     function freezeVaults(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -586,6 +697,10 @@ library ShwounsDAOProposals {
         return abi.encodePacked(bytes4(keccak256(bytes(signature))), data);
     }
 
+    /// @dev Derive the proposal's requested assets + per-asset amounts at queue time: ETH from the
+    ///      sum of values[], and ERC-20s from any `transfer(to,amount)` action (both raw-calldata and
+    ///      GovernorBravo signature-string encodings). Each ERC-20 must be on the M-04 fundable
+    ///      allowlist (ETH is always fundable); a non-allowlisted ERC-20 reverts the queue.
     function _extractAssetsAndAmounts(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -656,6 +771,10 @@ library ShwounsDAOProposals {
     // recordSnapshot — paged: snapshots active vaults' balances per asset
     // =========================================================================
 
+    /// @notice Page the snapshot phase: record each frozen vault's per-asset balance. Sets a vault's
+    ///         snapshot from its balance at the moment its page is processed (not a queue-time freeze).
+    /// @param proposalId The Queued proposal to snapshot.
+    /// @param batchSize The number of frozen vaults to process this call.
     function recordSnapshot(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -708,6 +827,10 @@ library ShwounsDAOProposals {
     // collect — paged: pulls each vault's pro-rata share into DAOLogic
     // =========================================================================
 
+    /// @notice Page the collect phase: pull each snapshotted vault's pro-rata share into the
+    ///         proposal's escrow. Shortfalls (owner withdrew since snapshot) are accepted and logged.
+    /// @param proposalId The Snapshotted proposal to collect for.
+    /// @param batchSize The number of snapshotted vaults to process this call.
     function collect(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -737,6 +860,7 @@ library ShwounsDAOProposals {
         }
     }
 
+    /// @dev Collect one vault's contribution across every requested asset into the proposal's escrow.
     function _collectFromVault(
         ShwounsDAOTypes.Storage storage ds,
         ShwounsDAOTypes.SnapshotState storage ss,
@@ -751,6 +875,12 @@ library ShwounsDAOProposals {
         }
     }
 
+    /// @dev Pull one (vault, asset) pro-rata share into the escrow: share = ceil(requested ×
+    ///      snapshotBalance / total), capped by the vault's current balance (a withdrawal since
+    ///      snapshot logs a ShortfallRecorded) and by the proposal's still-outstanding amount (so the
+    ///      ceiling rounding can't over-collect). Credits the ACTUAL balance delta the escrow received
+    ///      (M-04) to both the per-asset ledger (`collected`) and the per-vault tally (`pulled`, for
+    ///      refunds), never the requested pull — so a fee/rebasing token can't overstate collection.
     function _collectAsset(
         ShwounsDAOTypes.SnapshotState storage ss,
         uint256 proposalId,
@@ -806,6 +936,10 @@ library ShwounsDAOProposals {
     // finalize — makes the actual target.call(s) with accumulated funds
     // =========================================================================
 
+    /// @notice Execute a fully-Collected proposal's actions from its escrow (all-or-nothing solvency
+    ///         check, single global execution lock, retryable if a target reverts). Sets terminal
+    ///         Executed last. The facade allocates the voter reward pool immediately after.
+    /// @param proposalId The Collected proposal to finalize.
     function finalize(ShwounsDAOTypes.Storage storage ds, uint256 proposalId) external {
         // Global execution lock FIRST (review §4: `require(!_executing)`). Only one proposal may
         // execute at a time, and no nested finalize — of this OR any other proposal — can run while
@@ -913,6 +1047,8 @@ library ShwounsDAOProposals {
     ///         Executing status; (4) `candidate` is exactly that proposal's deterministic escrow
     ///         address; and (5) the candidate's code is the expected clone codehash. It never trusts
     ///         a caller-supplied proposalId, escrow storage, tx.origin, or the escrow's self-report.
+    /// @param candidate The address to authenticate (typically a governed contract's `msg.sender`).
+    /// @return True iff `candidate` is the active proposal's escrow during its finalize frame.
     function isActiveExecutor(
         ShwounsDAOTypes.Storage storage ds,
         address candidate
@@ -935,6 +1071,9 @@ library ShwounsDAOProposals {
     ///         to assets the proposal actually requested, so funds can't be stranded.
     /// @dev These library functions run in the facade's context (internal linkage), so msg.value /
     ///      msg.sender are the facade call's; the facade's topUp wrapper is payable.
+    /// @param proposalId The Collected proposal to top up.
+    /// @param asset The asset to contribute; `address(0)` for native ETH (sent as msg.value).
+    /// @param amount The amount to contribute (capped at the outstanding shortfall).
     function topUp(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -979,13 +1118,20 @@ library ShwounsDAOProposals {
     bytes32 internal constant BALLOT_TYPEHASH = keccak256("Ballot(uint256 proposalId,uint8 support)");
     bytes32 internal constant DOMAIN_NAME_HASH = keccak256("ShwounsDAO");
 
+    /// @notice Thrown when a vote-by-sig recovers the zero address (malformed ECDSA signature).
     /// @dev Used by castVoteBySig (ecrecover returning address(0)). The proposal-signature errors
     ///      live in ShwounsDAOSignatures.
     error SigInvalid();
 
     /// @dev Same as _validateActionsAndThreshold but without the proposer-threshold check
     ///      (proposeBySigs enforces threshold differently — via combined signer power).
+    /// @notice Validate a proposal's action arrays (lengths, count 1..10) WITHOUT a proposer-threshold
+    ///         check. Exposed `public` only for cross-library linking (A3 split); not for external use.
     /// @dev `public` so ShwounsDAOSignatures can reach it cross-library (A3 split).
+    /// @param targets The action target addresses.
+    /// @param values The ETH value for each action.
+    /// @param signatures The function signature strings for each action.
+    /// @param calldatas The calldata (or args) for each action.
     function _validateActionsAndThreshold_skip(
         ShwounsDAOTypes.Storage storage,
         address[] memory targets,
@@ -1000,8 +1146,11 @@ library ShwounsDAOProposals {
         if (targets.length > 10) revert TooManyActions();
     }
 
+    /// @notice The EIP-712 domain separator for ballot/proposal signatures. Exposed `public` only for
+    ///         cross-library linking (A3 split); not intended for external callers.
     /// @dev `public` so ShwounsDAOSignatures can reach it cross-library (A3 split). castVoteBySig
     ///      (this library) reaches it as a same-library JUMP, so the ballot path is unaffected.
+    /// @return The EIP-712 domain separator bound to this proxy + chain id.
     function _domainSeparator(ShwounsDAOTypes.Storage storage) public view returns (bytes32) {
         return keccak256(abi.encode(DOMAIN_TYPEHASH, DOMAIN_NAME_HASH, block.chainid, address(this)));
     }
@@ -1010,10 +1159,14 @@ library ShwounsDAOProposals {
     // Contribution refund (H-01, M-03) — paged, by ACTUAL per-vault contribution
     // =========================================================================
 
+    /// @notice Emitted per (proposal, asset) when a vault's actual contribution is refunded to it.
     event StuckProposalRefunded(uint256 indexed proposalId, address indexed asset, uint256 amount);
+    /// @notice Emitted after each refund page, reporting cursor progress over snapshotted vaults.
     event ProposalRefundProgress(uint256 indexed proposalId, uint256 refundProgress, uint256 total);
+    /// @notice Emitted when the final refund page completes (terminal — enables residual rescue).
     event ProposalRefunded(uint256 indexed proposalId);
 
+    /// @notice Thrown when a refund is attempted on a proposal already fully refunded.
     error AlreadyRefunded();
 
     /// @notice Permissionless contribution refund for a funded but DEAD proposal — Canceled or
@@ -1023,6 +1176,8 @@ library ShwounsDAOProposals {
     ///         is safe — destinations are the vaults themselves (from the registry), never the caller.
     ///         (A Collected proposal whose finalize is stuck uses the admin refundStuckProposal
     ///         instead, so a live proposal can't be permissionlessly forced into refund.)
+    /// @param proposalId The Canceled or Vetoed (and funded) proposal to refund.
+    /// @param batchSize The number of snapshotted vaults to refund this call.
     function refund(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -1040,6 +1195,8 @@ library ShwounsDAOProposals {
     ///         succeeds. Same paged, by-actual-contribution mechanics as refund(); kept admin-gated
     ///         (facade) so a live Collected proposal can't be permissionlessly forced into refund
     ///         (which would grief its finalize).
+    /// @param proposalId The stuck Collected proposal to unwind.
+    /// @param batchSize The number of snapshotted vaults to refund this call.
     function refundStuckProposal(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -1118,6 +1275,7 @@ library ShwounsDAOProposals {
     // Residual recovery — permissionless, strictly terminal-gated (A8)
     // =========================================================================
 
+    /// @notice Emitted when stray residual assets are swept from a terminal proposal's escrow to GR.
     event EscrowResidualRescued(
         uint256 indexed proposalId, uint8 kind, address indexed asset, uint256 tokenId, uint256 amount
     );
@@ -1131,6 +1289,11 @@ library ShwounsDAOProposals {
     ///         is Executing (not Executed), so a reentrant rescue of the active proposal reverts here
     ///         (round-6 finding 1). The escrow performs a typed transfer to its own immutable sink —
     ///         never an arbitrary call, never a caller-supplied recipient, never touching auth.
+    /// @param proposalId The terminal proposal whose escrow to sweep.
+    /// @param kind The residual asset kind (ETH / ERC20 / ERC721 / ERC1155).
+    /// @param asset The token contract (ignored for ETH).
+    /// @param tokenId The token id (ERC-721/1155 only).
+    /// @param amount The amount (ERC-1155 only).
     function rescueFromEscrow(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId,
@@ -1174,6 +1337,8 @@ library ShwounsDAOProposals {
     /// @notice Compute the quorum required for a proposal, given against-votes accumulated.
     ///         When checkpoints are configured, uses dynamic quorum: minBPS + (coefficient × againstBPS / 1e6).
     ///         When no checkpoints exist, falls back to the fixed `quorumVotesBPS` recorded at creation.
+    /// @param proposalId The proposal whose quorum to compute.
+    /// @return The required quorum in absolute votes.
     function quorumVotes(
         ShwounsDAOTypes.Storage storage ds,
         uint256 proposalId
@@ -1193,6 +1358,9 @@ library ShwounsDAOProposals {
         return _dynamicQuorumVotes(proposal.againstVotes, proposal.totalSupply, params);
     }
 
+    /// @dev Dynamic quorum (V4 parity): quorumBPS = min(maxQuorumVotesBPS, minQuorumVotesBPS +
+    ///      coefficient × againstVotesBPS / 1e6), returned in absolute votes. More Against → higher
+    ///      quorum, clamped to the configured max.
     function _dynamicQuorumVotes(
         uint256 againstVotes,
         uint256 totalSupply,
@@ -1209,6 +1377,8 @@ library ShwounsDAOProposals {
     }
 
     /// @notice The dynamic-quorum params in effect at a given block (public view; Nouns parity).
+    /// @param blockNumber The block to resolve params at.
+    /// @return The dynamic-quorum params active at `blockNumber` (zeroed if before the first checkpoint).
     function getDynamicQuorumParamsAt(
         ShwounsDAOTypes.Storage storage ds,
         uint256 blockNumber
@@ -1219,6 +1389,9 @@ library ShwounsDAOProposals {
         return _getDynamicQuorumParamsAt(ds, blockNumber);
     }
 
+    /// @dev Binary-search the quorum-params checkpoints for the entry in effect at `blockNumber`;
+    ///      returns zeroed params for a block before the first checkpoint (callers fall back to the
+    ///      fixed quorum recorded at proposal creation).
     function _getDynamicQuorumParamsAt(
         ShwounsDAOTypes.Storage storage ds,
         uint256 blockNumber
@@ -1256,7 +1429,12 @@ library ShwounsDAOProposals {
     // Helpers
     // =========================================================================
 
+    /// @notice Compute `bps` basis points of `number` (floored). Exposed `public` only for
+    ///         cross-library linking (A3 split); not intended for external callers.
     /// @dev `public` so ShwounsDAOSignatures can reach it cross-library (A3 split).
+    /// @param bps The basis points (1/10000).
+    /// @param number The base value.
+    /// @return The floored product `number * bps / 10000`.
     function bps2Uint(uint256 bps, uint256 number) public pure returns (uint256) {
         return (number * bps) / 10000;
     }

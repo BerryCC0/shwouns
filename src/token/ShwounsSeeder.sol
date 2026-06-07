@@ -9,6 +9,7 @@ import { IShwounsSeeder } from '../interfaces/IShwounsSeeder.sol';
 import { IShwounsDescriptorMinimal } from '../interfaces/IShwounsDescriptorMinimal.sol';
 
 contract ShwounsSeeder is IShwounsSeeder {
+    /// @inheritdoc IShwounsSeeder
     function generateSeed(uint256 nounId, IShwounsDescriptorMinimal descriptor) external view override returns (Seed memory) {
         uint256 pseudorandomness = uint256(
             keccak256(abi.encodePacked(blockhash(block.number - 1), nounId))

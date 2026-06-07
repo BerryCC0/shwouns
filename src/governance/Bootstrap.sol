@@ -28,85 +28,139 @@ pragma solidity ^0.8.19;
 // typed contract on the real contract are declared here as `address` — ABI-identical (20-byte word).
 // ---------------------------------------------------------------------------------------------------
 
+/// @notice Minimal Ownable surface: read owner + transfer it (used for ownership prechecks + handoff).
 interface IOwnableLike {
+    /// @notice The current owner. @return The owner address.
     function owner() external view returns (address);
+    /// @notice Transfer ownership. @param newOwner The new owner.
     function transferOwnership(address newOwner) external;
 }
 
+/// @notice Minimal GovernedOwnable surface: read the immutable auth registry (immutable-matrix check).
 interface IGovernedLike {
+    /// @notice The contract's immutable auth registry. @return The registry address.
     function governanceAuth() external view returns (address);
 }
 
+/// @notice Minimal ShwounsToken surface used by the wiring checks.
 interface ITokenLike {
+    /// @notice The authorized minter. @return The minter address.
     function minter() external view returns (address);
+    /// @notice The descriptor. @return The descriptor address.
     function descriptor() external view returns (address);
 }
 
+/// @notice Minimal ShwounsAuctionHouse surface used by the wiring/immutable checks + handoff unpause.
 interface IAuctionLike {
+    /// @notice The settlement-proceeds recipient. @return The GovernanceRewards address.
     function governanceRewards() external view returns (address);
+    /// @notice The vault registry. @return The registry address.
     function vaultRegistry() external view returns (address);
+    /// @notice The Shwouns token. @return The token address.
     function shwouns() external view returns (address);
+    /// @notice Whether the proceeds recipient is locked. @return True if locked.
     function governanceRewardsLocked() external view returns (bool);
+    /// @notice Whether the vault registry is locked. @return True if locked.
     function vaultRegistryLocked() external view returns (bool);
+    /// @notice Whether the auction house is paused. @return True if paused.
     function paused() external view returns (bool);
+    /// @notice Unpause the auction house (kicks off auction #1 during handoff).
     function unpause() external;
 }
 
+/// @notice Minimal ShwounsVaultRegistry surface used by the wiring/immutable checks.
 interface IVaultRegistryLike {
+    /// @notice The vault implementation. @return The implementation address.
     function vaultImplementation() external view returns (address);
+    /// @notice Whether the vault implementation is locked. @return True if locked.
     function vaultImplementationLocked() external view returns (bool);
+    /// @notice The registered DAOLogic. @return The DAOLogic address.
     function daoLogic() external view returns (address);
+    /// @notice Whether the DAOLogic reference is locked. @return True if locked.
     function daoLogicLocked() external view returns (bool);
+    /// @notice The bound Shwouns token. @return The token address.
     function shwounsToken() external view returns (address);
 }
 
+/// @notice Minimal GovernanceRewards surface used by the wiring checks.
 interface IRewardsLike {
+    /// @notice The registered DAOLogic. @return The DAOLogic address.
     function dao() external view returns (address);
+    /// @notice The approval registry. @return The registry address.
     function approvalRegistry() external view returns (address);
+    /// @notice Whether the DAOLogic reference is locked. @return True if locked.
     function daoLocked() external view returns (bool);
+    /// @notice Whether the approval registry is locked. @return True if locked.
     function approvalRegistryLocked() external view returns (bool);
 }
 
+/// @notice Minimal GovernanceIncentivesNFT surface used by the wiring checks.
 interface IGiLike {
+    /// @notice The mint-proceeds recipient. @return The recipient address.
     function proceedsRecipient() external view returns (address);
 }
 
+/// @notice Minimal ApprovalRegistry surface used by the wiring checks.
 interface IApprovalRegistryLike {
+    /// @notice The curated GI NFT. @return The GI NFT address.
     function giNFT() external view returns (address);
 }
 
+/// @notice Minimal ShwounsDescriptor surface used by the wiring/immutable checks.
 interface IDescriptorLike {
+    /// @notice The art contract. @return The art address.
     function art() external view returns (address);
+    /// @notice Whether art parts are locked. @return True if locked.
     function arePartsLocked() external view returns (bool);
 }
 
+/// @notice Minimal ShwounsArt surface used by the wiring checks.
 interface IArtLike {
+    /// @notice The authorized descriptor. @return The descriptor address.
     function descriptor() external view returns (address);
 }
 
+/// @notice Minimal ShwounsVault implementation surface used by the immutable-matrix check.
 interface IVaultImplLike {
+    /// @notice The vault registry baked into the impl. @return The registry address.
     function vaultRegistry() external view returns (address);
 }
 
+/// @notice Minimal ProposalEscrow implementation surface used by the immutable-matrix check.
 interface IEscrowImplLike {
+    /// @notice The DAOLogic baked into the escrow impl. @return The DAOLogic address.
     function daoLogic() external view returns (address);
+    /// @notice The residual sink baked into the escrow impl. @return The sink address.
     function residualSink() external view returns (address);
 }
 
+/// @notice Minimal ShwounsDAOLogic surface used by the wiring/immutable checks + admin handoff.
 interface IDAOLike {
+    /// @notice The GovernanceRewards reference. @return The GR address.
     function governanceRewards() external view returns (address);
+    /// @notice Whether the GR reference is locked. @return True if locked.
     function governanceRewardsLocked() external view returns (bool);
+    /// @notice The ProposalEscrow implementation. @return The implementation address.
     function proposalEscrowImplementation() external view returns (address);
+    /// @notice Whether the escrow implementation is locked. @return True if locked.
     function proposalEscrowImplementationLocked() external view returns (bool);
+    /// @notice The Shwouns token. @return The token address.
     function shwouns() external view returns (address);
+    /// @notice The vault registry. @return The registry address.
     function vaultRegistry() external view returns (address);
+    /// @notice The current admin. @return The admin address.
     function admin() external view returns (address);
+    /// @notice One-shot direct admin handoff to the DAO itself (called during finalize).
     function setAdminToDAO() external;
 }
 
+/// @notice Minimal GovernanceAuthRegistry surface used by the immutable check + handoff bind.
 interface IAuthRegistryLike {
+    /// @notice The immutable binder. @return The binder address.
     function binder() external view returns (address);
+    /// @notice The bound DAOLogic. @return The DAOLogic address (zero until bound).
     function daoLogic() external view returns (address);
+    /// @notice Bind the DAOLogic proxy (called during finalize). @param daoLogic The DAOLogic to bind.
     function bindDAOLogic(address daoLogic) external;
 }
 
@@ -147,17 +201,28 @@ contract Bootstrap {
     /// @notice The stored deployment manifest (set once).
     DeploymentManifest public manifest;
 
+    /// @notice Emitted for each CREATE2 deployment Bootstrap performs.
     event Deployed(address indexed addr, bytes32 indexed salt);
+    /// @notice Emitted for each successful `execute`/`executeBatch` call against a registered target.
     event Executed(address indexed target);
+    /// @notice Emitted when the deployment manifest is committed.
     event ManifestRegistered(address indexed dao);
+    /// @notice Emitted when the one-shot handoff completes and Bootstrap is permanently disabled.
     event Finalized(address indexed dao);
 
+    /// @notice Thrown when a non-operator calls an operator-gated function.
     error NotOperator();
+    /// @notice Thrown when any driving function is called after finalize.
     error AlreadyFinalized();
+    /// @notice Thrown when `execute`/`executeBatch` targets a non-Bootstrap-deployed address.
     error NotRegistered(address target);
+    /// @notice Thrown when a CREATE2 deployment returns the zero address.
     error DeployFailed();
+    /// @notice Thrown when registerManifest is called more than once.
     error ManifestAlreadySet();
+    /// @notice Thrown when finalize is called before the manifest is registered.
     error ManifestNotSet();
+    /// @notice Thrown when executeBatch is given targets/datas arrays of unequal length.
     error BatchLengthMismatch();
 
     constructor() {
@@ -181,6 +246,9 @@ contract Bootstrap {
     /// @notice CREATE2-deploy supplied creation code (constructor args already appended by the
     ///         caller). Because Bootstrap executes the CREATE2, `msg.sender` in the constructor is
     ///         Bootstrap → every Ownable it deploys is owned by Bootstrap (A10.1: no EOA owns roles).
+    /// @param creationCode The full creation bytecode with constructor args already appended.
+    /// @param salt The CREATE2 salt.
+    /// @return addr The deployed contract address.
     function deploy(bytes calldata creationCode, bytes32 salt)
         external
         onlyOperator
@@ -200,6 +268,9 @@ contract Bootstrap {
     ///         contract (wiring + art load/lock). Restricted to registered targets and bubbles the
     ///         target's revert. Non-payable: no protocol wiring needs value, and the contracts are
     ///         funded later by auctions/governance.
+    /// @param target The registered (Bootstrap-deployed) contract to call.
+    /// @param data The calldata to forward.
+    /// @return The target's return data.
     function execute(address target, bytes calldata data)
         external
         onlyOperator
@@ -219,6 +290,8 @@ contract Bootstrap {
 
     /// @notice Batched `execute` — for the ~20-30 art-load ops in a few txs. Same registered-target
     ///         + revert-bubble semantics per call.
+    /// @param targets The registered contracts to call (parallel to `datas`).
+    /// @param datas The calldata to forward to each target.
     function executeBatch(address[] calldata targets, bytes[] calldata datas)
         external
         onlyOperator
@@ -244,6 +317,7 @@ contract Bootstrap {
     /// @notice Commit the complete deployment manifest. Each address must be Bootstrap-deployed
     ///         (isRegistered), nonzero, and pairwise-distinct — so the exact set finalize checks is
     ///         fixed up front and nothing can be omitted, duplicated, or foreign.
+    /// @param m The complete deployment manifest (every address Bootstrap-deployed + distinct).
     function registerManifest(DeploymentManifest calldata m) external onlyOperator notFinalized {
         if (manifestRegistered) revert ManifestAlreadySet();
 

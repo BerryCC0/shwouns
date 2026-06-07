@@ -32,6 +32,8 @@ import { IGovernanceAuthRegistry } from '../governance/GovernanceAuthRegistry.so
 
 /// @dev Candidate-implementation getter used by the A9 honest-upgrade safeguard.
 interface IAuthed {
+    /// @notice The auth registry a UUPS upgrade candidate reports (must match the canonical one).
+    /// @return The candidate implementation's `governanceAuth` address.
     function governanceAuth() external view returns (address);
 }
 
@@ -61,25 +63,36 @@ contract ShwounsAuctionHouse is
     ///         no storage slot. onlyOwner functions also accept the active proposal escrow via this.
     IGovernanceAuthRegistry public immutable governanceAuth;
 
+    /// @notice The minimum opening bid for an auction (wei).
     uint192 public reservePrice;
+    /// @notice If a bid lands within this many seconds of the end, the auction extends by it.
     uint56 public timeBuffer;
+    /// @notice Each new bid must exceed the previous by at least this percentage.
     uint8 public minBidIncrementPercentage;
 
+    /// @notice The currently-active auction (packed V2 layout).
     IShwounsAuctionHouse.AuctionV2 public auctionStorage;
     mapping(uint256 => SettlementState) settlementHistory;
+    /// @notice Optional Chainalysis sanctions oracle; bids from sanctioned addresses are rejected.
     IChainalysisSanctionsList public sanctionsOracle;
 
     /// @notice Recipient of all settlement proceeds. Settable once, then locked.
     address public governanceRewards;
+    /// @notice True once `governanceRewards` has been set, after which it can never change.
     bool public governanceRewardsLocked;
 
     /// @notice Vault registry used to deploy per-Shwoun vaults. Settable once, then locked.
     IShwounsVaultRegistry public vaultRegistry;
+    /// @notice True once `vaultRegistry` has been set, after which it can never change.
     bool public vaultRegistryLocked;
 
+    /// @notice Thrown when a one-time setter is called after it has already been locked.
     error AlreadyLocked();
+    /// @notice Thrown when a setter is given the zero address.
     error InvalidAddress();
+    /// @notice Thrown when settling before `governanceRewards` (the proceeds recipient) is set.
     error GovernanceRewardsNotSet();
+    /// @notice Thrown when creating an auction before the vault registry is set.
     error VaultRegistryNotSet();
 
     constructor(IShwounsToken _shwouns, address _weth, uint256 _duration, address _governanceAuth) initializer {
@@ -100,6 +113,7 @@ contract ShwounsAuctionHouse is
 
     /// @notice A10.5: once the auth registry is bound (post-bootstrap), ownership may only move to
     ///         the canonical DAO or address(0) — never an EOA. Pre-binding (bootstrap) is standard.
+    /// @param newOwner The proposed owner; constrained to the DAO or `address(0)` once bound.
     function transferOwnership(address newOwner) public virtual override onlyOwner {
         if (address(governanceAuth) != address(0)) {
             address dao = governanceAuth.daoLogic();
@@ -111,6 +125,10 @@ contract ShwounsAuctionHouse is
     }
 
     /// @notice Initialize the auction house. Sets initial knobs and pauses for setup.
+    /// @param _reservePrice The minimum opening bid (wei).
+    /// @param _timeBuffer The end-of-auction extension window (seconds).
+    /// @param _minBidIncrementPercentage The minimum bid increment over the prior bid (percent).
+    /// @param _sanctionsOracle The Chainalysis sanctions oracle (or zero to disable the check).
     function initialize(
         uint192 _reservePrice,
         uint56 _timeBuffer,
@@ -136,6 +154,8 @@ contract ShwounsAuctionHouse is
     // One-time setters (called during deployment, then locked)
     // -------------------------------------------------------------------------
 
+    /// @notice Set the settlement-proceeds recipient (GovernanceRewards). Callable once, then locked.
+    /// @param _governanceRewards The GovernanceRewards address.
     function setGovernanceRewards(address _governanceRewards) external onlyOwner {
         if (governanceRewardsLocked) revert AlreadyLocked();
         if (_governanceRewards == address(0)) revert InvalidAddress();
@@ -144,6 +164,8 @@ contract ShwounsAuctionHouse is
         emit GovernanceRewardsSet(_governanceRewards);
     }
 
+    /// @notice Set the vault registry used to deploy per-Shwoun vaults. Callable once, then locked.
+    /// @param _vaultRegistry The ShwounsVaultRegistry address.
     function setVaultRegistry(IShwounsVaultRegistry _vaultRegistry) external onlyOwner {
         if (vaultRegistryLocked) revert AlreadyLocked();
         if (address(_vaultRegistry) == address(0)) revert InvalidAddress();
@@ -156,6 +178,9 @@ contract ShwounsAuctionHouse is
     // UUPS upgrade authorization
     // -------------------------------------------------------------------------
 
+    /// @dev UUPS upgrade gate (A9): authorize ONLY the active proposal escrow (governance), never a
+    ///      standing EOA/admin, and require the candidate impl to report the canonical auth registry
+    ///      (honest-upgrade safeguard against a storage-layout-only diff).
     function _authorizeUpgrade(address newImplementation) internal view override {
         // A9: auction-house upgrades flow ONLY through an authenticated active proposal escrow.
         if (address(governanceAuth) == address(0) || !governanceAuth.isActiveExecutor(msg.sender)) {
@@ -173,19 +198,26 @@ contract ShwounsAuctionHouse is
     // Auction lifecycle
     // -------------------------------------------------------------------------
 
+    /// @notice Settle the current auction and immediately start the next one. Reverts while paused.
     function settleCurrentAndCreateNewAuction() external override whenNotPaused {
         _settleAuction();
         _createAuction();
     }
 
+    /// @notice Settle the current auction without starting a new one. Only while paused.
     function settleAuction() external override whenPaused {
         _settleAuction();
     }
 
+    /// @notice Bid on the Shwoun currently up for auction (no client attribution).
+    /// @param shwounId The id of the Shwoun being bid on (must match the active auction).
     function createBid(uint256 shwounId) external payable override {
         createBid(shwounId, 0);
     }
 
+    /// @notice Bid on the current Shwoun, attributing the bid to a front-end client id.
+    /// @param shwounId The id of the Shwoun being bid on (must match the active auction).
+    /// @param clientId The front-end client id to attribute the bid to (0 = none).
     function createBid(uint256 shwounId, uint32 clientId) public payable override {
         IShwounsAuctionHouse.AuctionV2 memory _auction = auctionStorage;
 
@@ -224,6 +256,8 @@ contract ShwounsAuctionHouse is
         }
     }
 
+    /// @notice The current auction as an unpacked view struct.
+    /// @return The active auction (shwounId, amount, start/end time, bidder, settled).
     function auction() external view returns (AuctionV2View memory) {
         return AuctionV2View({
             shwounId: auctionStorage.shwounId,
@@ -235,10 +269,12 @@ contract ShwounsAuctionHouse is
         });
     }
 
+    /// @notice Pause the auction house (no settle-and-create while paused). Owner/governance only.
     function pause() external override onlyOwner {
         _pause();
     }
 
+    /// @notice Unpause and, if no auction is live, start one. Owner/governance only.
     function unpause() external override onlyOwner {
         _unpause();
         if (auctionStorage.startTime == 0 || auctionStorage.settled) {
@@ -246,23 +282,31 @@ contract ShwounsAuctionHouse is
         }
     }
 
+    /// @notice Set the end-of-auction extension window. Owner/governance only.
+    /// @param _timeBuffer The new time buffer (seconds); capped at `MAX_TIME_BUFFER`.
     function setTimeBuffer(uint56 _timeBuffer) external override onlyOwner {
         require(_timeBuffer <= MAX_TIME_BUFFER, 'timeBuffer too large');
         timeBuffer = _timeBuffer;
         emit AuctionTimeBufferUpdated(_timeBuffer);
     }
 
+    /// @notice Set the minimum opening bid. Owner/governance only.
+    /// @param _reservePrice The new reserve price (wei).
     function setReservePrice(uint192 _reservePrice) external override onlyOwner {
         reservePrice = _reservePrice;
         emit AuctionReservePriceUpdated(_reservePrice);
     }
 
+    /// @notice Set the minimum bid increment over the prior bid. Owner/governance only.
+    /// @param _minBidIncrementPercentage The new increment (percent); must be greater than zero.
     function setMinBidIncrementPercentage(uint8 _minBidIncrementPercentage) external override onlyOwner {
         require(_minBidIncrementPercentage > 0, 'must be greater than zero');
         minBidIncrementPercentage = _minBidIncrementPercentage;
         emit AuctionMinBidIncrementPercentageUpdated(_minBidIncrementPercentage);
     }
 
+    /// @notice Set (or clear) the Chainalysis sanctions oracle. Owner/governance only.
+    /// @param newSanctionsOracle The new oracle address, or zero to disable the sanctions check.
     function setSanctionsOracle(address newSanctionsOracle) public onlyOwner {
         sanctionsOracle = IChainalysisSanctionsList(newSanctionsOracle);
         emit SanctionsOracleSet(newSanctionsOracle);
@@ -366,6 +410,8 @@ contract ShwounsAuctionHouse is
     // Settlement history (unchanged from V3)
     // -------------------------------------------------------------------------
 
+    /// @notice Backfill historical settlement prices (e.g. for analytics). Owner/governance only.
+    /// @param settlements The (shwounId, blockTimestamp, amount, winner) records to write.
     function setPrices(SettlementNoClientId[] memory settlements) external onlyOwner {
         for (uint256 i = 0; i < settlements.length; ++i) {
             SettlementState storage settlementState = settlementHistory[settlements[i].shwounId];
@@ -375,6 +421,10 @@ contract ShwounsAuctionHouse is
         }
     }
 
+    /// @notice Pre-warm settlement-history storage slots over a range (gas optimization for future
+    ///         settlements). Permissionless. Skips founder-mint ids.
+    /// @param startId The first id to warm (inclusive).
+    /// @param endId The id to stop at (exclusive).
     function warmUpSettlementState(uint256 startId, uint256 endId) external {
         for (uint256 i = startId; i < endId; ++i) {
             if (i <= FOUNDERS_REWARD_ENDS && i % 10 == 0) continue;
@@ -386,6 +436,10 @@ contract ShwounsAuctionHouse is
         }
     }
 
+    /// @notice The most recent `auctionCount` settlements, newest first.
+    /// @param auctionCount The number of settlements to return.
+    /// @param skipEmptyValues If true, skip ids with no recorded settlement data.
+    /// @return settlements The settlement records (trimmed to those actually found).
     function getSettlements(
         uint256 auctionCount,
         bool skipEmptyValues
@@ -421,6 +475,9 @@ contract ShwounsAuctionHouse is
         }
     }
 
+    /// @notice The most recent `auctionCount` winning prices (excludes no-bid/founder ids).
+    /// @param auctionCount The number of prices to return; reverts if history is insufficient.
+    /// @return prices The winning bid amounts, newest first.
     function getPrices(uint256 auctionCount) external view returns (uint256[] memory prices) {
         uint256 latestShwounId = auctionStorage.shwounId;
         if (!auctionStorage.settled && latestShwounId > 0) {
@@ -443,6 +500,11 @@ contract ShwounsAuctionHouse is
         require(auctionCount == actualCount, 'Not enough history');
     }
 
+    /// @notice Settlements from `startId` forward until a record newer than `endTimestamp`.
+    /// @param startId The first id to include (inclusive).
+    /// @param endTimestamp Stop once a settlement's timestamp exceeds this.
+    /// @param skipEmptyValues If true, skip ids with no recorded settlement data.
+    /// @return settlements The settlement records (trimmed to those actually found).
     function getSettlementsFromIdtoTimestamp(
         uint256 startId,
         uint256 endTimestamp,
@@ -472,6 +534,11 @@ contract ShwounsAuctionHouse is
         }
     }
 
+    /// @notice Settlements over the half-open id range `[startId, endId)`.
+    /// @param startId The first id to include (inclusive).
+    /// @param endId The id to stop at (exclusive).
+    /// @param skipEmptyValues If true, skip ids with no recorded settlement data.
+    /// @return settlements The settlement records (trimmed to those actually found).
     function getSettlements(
         uint256 startId,
         uint256 endId,
@@ -497,6 +564,9 @@ contract ShwounsAuctionHouse is
         }
     }
 
+    /// @notice The front-end client id credited with the winning bid for a Shwoun.
+    /// @param shwounId The Shwoun id.
+    /// @return The winning bid's client id (0 if none).
     function biddingClient(uint256 shwounId) external view returns (uint32) {
         return settlementHistory[shwounId].clientId;
     }
