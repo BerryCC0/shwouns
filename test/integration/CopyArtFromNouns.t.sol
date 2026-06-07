@@ -1,153 +1,85 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity ^0.8.19;
 
-import {Test} from "forge-std/Test.sol";
+import {BootstrapFixture} from "./BootstrapFixture.sol";
 import {Bootstrap} from "../../src/governance/Bootstrap.sol";
 import {CopyArtFromNouns, INounsArtView} from "../../script/CopyArtFromNouns.s.sol";
 import {MockNounsArt} from "../mocks/MockNounsArt.sol";
-import {MockWETH} from "../mocks/MockWETH.sol";
-import {ERC6551Registry} from "../mocks/ERC6551Registry.sol";
 import {ShwounsArt} from "../../src/token/ShwounsArt.sol";
-import {ShwounsDescriptor} from "../../src/token/ShwounsDescriptor.sol";
-import {IShwounsArt} from "../../src/interfaces/IShwounsArt.sol";
-import {ISVGRenderer} from "../../src/interfaces/ISVGRenderer.sol";
-import {IShwounsDescriptorMinimal} from "../../src/interfaces/IShwounsDescriptorMinimal.sol";
 
-contract CopyArtFromNounsTest is Test {
-    address constant CANONICAL_REGISTRY = 0x000000006551c19487814612e58FE06813775758;
-
-    Bootstrap b;
+/// @notice Proves the production art-copy flow (audit F3): the descriptor is owned by Bootstrap, and
+///         art is loaded by routing the descriptor's onlyOwner ops through Bootstrap.executeBatch.
+///         The op list is built by the script's pure buildOps(); the operator (this test) executes it.
+contract CopyArtFromNounsTest is BootstrapFixture {
     ShwounsArt art;
-    ShwounsDescriptor descriptor;
     CopyArtFromNouns copyScript;
     MockNounsArt mockNounsArt;
 
-    address operator = makeAddr("operator");
-    address foundersDAO = makeAddr("foundersDAO");
-
     function setUp() public {
-        ERC6551Registry tmp = new ERC6551Registry();
-        vm.etch(CANONICAL_REGISTRY, address(tmp).code);
-
-        MockWETH weth = new MockWETH();
-
-        // Deploy the full art stack
-        Bootstrap.Config memory cfg = Bootstrap.Config({
-            foundersDAO: foundersDAO,
-            weth: address(weth),
-            auctionDuration: 86400,
-            reservePrice: 0.01 ether,
-            timeBuffer: 300,
-            minBidIncrementPct: 2,
-            votingDelay: 1,
-            votingPeriod: 7200,
-            proposalThresholdBPS: 1,
-            proposalUpdatablePeriodInBlocks: 0,
-            proposalQueuePeriodInBlocks: 50400,
-            quorumVotesBPS: 1000,
-            giMintPrice: 0.01 ether,
-            proposalReward: 0.1 ether,
-            maxRefundPerVote: 0.003 ether,
-            lastMinuteWindowBlocks: 1,
-            objectionPeriodBlocks: 3,
-            art: IShwounsArt(address(0)),
-            renderer: ISVGRenderer(address(0)),
-            preDeployedDescriptor: IShwounsDescriptorMinimal(address(0))
-        });
-        b = new Bootstrap();
-        b.deploy(cfg); // not finalized: registry unbound, Bootstrap owns the descriptor
-        art = b.art();
-        descriptor = b.descriptor();
-
-        // Set up the mock Nouns Art with realistic data
-        mockNounsArt = new MockNounsArt();
+        _deploySystem();
+        art = ShwounsArt(m.art);
         copyScript = new CopyArtFromNouns();
 
-        // Palette pointer — just any address; it's stored as-is
+        mockNounsArt = new MockNounsArt();
         mockNounsArt.setPalette0(address(0xCAFE));
-
-        // 2 backgrounds
         mockNounsArt.addBackground("e1d7d5");
         mockNounsArt.addBackground("d5d7e1");
 
-        // Bodies: 2 pages, 30 total images (matches Nouns' deployment shape)
         INounsArtView.NounArtStoragePage[] memory bodyPages = new INounsArtView.NounArtStoragePage[](2);
         bodyPages[0] = INounsArtView.NounArtStoragePage({ imageCount: 15, decompressedLength: 1000, pointer: address(0x1001) });
         bodyPages[1] = INounsArtView.NounArtStoragePage({ imageCount: 15, decompressedLength: 1000, pointer: address(0x1002) });
         mockNounsArt.setBodies(bodyPages, 30);
 
-        // Accessories: 5 pages, 140 total
         INounsArtView.NounArtStoragePage[] memory accPages = new INounsArtView.NounArtStoragePage[](5);
         for (uint256 i = 0; i < 5; i++) {
-            accPages[i] = INounsArtView.NounArtStoragePage({
-                imageCount: 28, decompressedLength: 5000, pointer: address(uint160(0x2000 + i))
-            });
+            accPages[i] = INounsArtView.NounArtStoragePage({ imageCount: 28, decompressedLength: 5000, pointer: address(uint160(0x2000 + i)) });
         }
         mockNounsArt.setAccessories(accPages, 140);
 
-        // Heads: 10 pages, 240 total
         INounsArtView.NounArtStoragePage[] memory headPages = new INounsArtView.NounArtStoragePage[](10);
         for (uint256 i = 0; i < 10; i++) {
-            headPages[i] = INounsArtView.NounArtStoragePage({
-                imageCount: 24, decompressedLength: 10000, pointer: address(uint160(0x3000 + i))
-            });
+            headPages[i] = INounsArtView.NounArtStoragePage({ imageCount: 24, decompressedLength: 10000, pointer: address(uint160(0x3000 + i)) });
         }
         mockNounsArt.setHeads(headPages, 240);
     }
 
+    /// @dev Build the op list (script logic) and execute it through Bootstrap as the operator (this).
+    function _runCopy() internal {
+        (address[] memory targets, bytes[] memory datas) = copyScript.buildOps(m.descriptor, mockNounsArt);
+        b.executeBatch(targets, datas);
+    }
+
     function test_copy_setsAllArtCorrectly() public {
-        // Sanity: before copy, ShwounsArt is empty
+        // Before copy, ShwounsArt is empty.
         assertEq(art.backgroundCount(), 0);
         assertEq(art.bodyCount(), 0);
         assertEq(art.accessoryCount(), 0);
         assertEq(art.headCount(), 0);
 
-        // Copy script makes internal calls to descriptor's onlyOwner functions. Transfer
-        // descriptor ownership to the copy script for the duration of the operation.
-        vm.prank(address(b));
-        descriptor.transferOwnership(address(copyScript));
-        copyScript.copy(descriptor, mockNounsArt);
+        _runCopy();
 
-        // Verify everything got copied
         assertEq(art.backgroundCount(), 2);
         assertEq(art.backgrounds(0), "e1d7d5");
         assertEq(art.backgrounds(1), "d5d7e1");
-
-        // Palette pointer copied (read by Art via SSTORE2.read; here we just check the pointer
-        // mapping was updated — the actual palette() read would attempt to SSTORE2.read from
-        // address(0xCAFE) which has no code, so it'd revert. That's fine for this test —
-        // mainnet has real pointers).
         assertEq(art.palettesPointers(0), address(0xCAFE));
-
-        // Bodies: 30 total images via 2 pages
         assertEq(art.bodyCount(), 30);
-        // Accessories: 140 via 5 pages
         assertEq(art.accessoryCount(), 140);
-        // Heads: 240 via 10 pages
         assertEq(art.headCount(), 240);
     }
 
     function test_copy_skipsGlassesEntirely() public {
-        // Mock has no glasses-related methods (and ShwounsArt has no glasses storage either).
-        // The script doesn't reference glasses. This test just documents that fact —
-        // simply running copy() with no glasses-related data succeeds.
-        vm.prank(address(b));
-        descriptor.transferOwnership(address(copyScript));
-        copyScript.copy(descriptor, mockNounsArt);
-
-        // Verify the Shwouns Art struct has no glasses-related fields by examining the
-        // descriptor's getPartsForSeed return — should be 3 parts (body, accessory, head).
-        // The Art itself doesn't even expose a glassesCount() function (we stripped it
-        // in IShwounsArt). So no test surface to assert against — the absence is the test.
-        assertEq(art.headCount(), 240); // last assertion as a smoke check
+        // The mock + ShwounsArt have no glasses surface; running copy with no glasses data succeeds.
+        _runCopy();
+        assertEq(art.headCount(), 240);
     }
 
-    function test_copy_requiresOwnership() public {
-        // Copy requires calling descriptor.addManyBackgrounds (etc.) which is onlyOwner.
-        // The descriptor's owner is the Deploy contract; some other caller can't drive it.
-        address randomCaller = makeAddr("random");
-        vm.prank(randomCaller);
-        vm.expectRevert("Ownable: caller is not the owner");
-        copyScript.copy(descriptor, mockNounsArt);
+    /// @dev F3/F2: art is loaded ONLY through the Bootstrap operator. A non-operator routing the same
+    ///      ops reverts (the descriptor's onlyOwner is Bootstrap, and Bootstrap's executeBatch is
+    ///      operator-gated) — so the EOA can't drive the descriptor directly.
+    function test_copy_onlyOperatorCanDrive() public {
+        (address[] memory targets, bytes[] memory datas) = copyScript.buildOps(m.descriptor, mockNounsArt);
+        vm.prank(makeAddr("random"));
+        vm.expectRevert(Bootstrap.NotOperator.selector);
+        b.executeBatch(targets, datas);
     }
 }
