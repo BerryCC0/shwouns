@@ -127,12 +127,24 @@ declarations; visual scanning isn't a gate). Define coverage as:
   `@dev` (the escrow/auth/finalize/refund/collect paths especially). Trivial getters/helpers exempt.
 - **Out of scope:** Group C/D forked/reference files (documented in curated pages, not edited).
 
-**Reproducible check (build it as part of this work): `script/check-natspec.py`** — for each in-scope
-contract, compare its ABI (`forge inspect <C> abi`) against its `userdoc` + `devdoc`
-(`forge inspect <C> userdoc` / `devdoc`, or `solc --userdoc --devdoc`): flag any external/public
-function, event, or error missing a `@notice`, and any function param/return missing its tag. Exit
-non-zero on gaps so it can gate CI alongside `check-storage-layout.sh`. This makes "documented" a
-build check, not a judgment call.
+**Reproducible check (build it as part of this work): `script/check-natspec.py`.** Do NOT diff the flat
+ABI — an ABI flattens inherited functions and synthesizes public-variable getters, so it would demand
+NatSpec on members the contract doesn't declare. Drive the check off the **compiler AST + source
+locations** instead (`forge build` with `extra_output = ["ast"]`, or `solc --ast-compact-json`):
+- **Attribute by declaration site:** for each in-scope contract, enumerate only the
+  `FunctionDefinition` / `EventDefinition` / `ErrorDefinition` / public `VariableDeclaration` nodes
+  **declared in that contract's own source** (the node's `src` falls in the in-scope file). This
+  automatically **excludes inherited APIs** (incl. inherited Group C/D / OpenZeppelin functions) —
+  they're declared elsewhere and documented (or not) at their source.
+- **Recognize `@inheritdoc`:** a member whose `documentation` is `@inheritdoc X` counts as documented
+  (its tags come from the named base/interface).
+- **Public-variable getters:** check the **`VariableDeclaration`'s** own `@notice`/`@dev` (or
+  `@inheritdoc`), not the synthesized getter in the ABI.
+- **Scope:** Groups A + B only; require `@notice` on every declared external/public function, event,
+  and error, `@param`/`@return` on each function arg/return, and at least `@dev` on Group-A
+  security-critical internal/private functions. Skip trivial getters/helpers.
+- Exit non-zero on gaps so it can gate CI alongside `check-storage-layout.sh` — "documented" becomes a
+  build check, not a judgment call.
 
 ## Visuals to author
 

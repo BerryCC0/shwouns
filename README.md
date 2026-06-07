@@ -45,7 +45,7 @@ an external audit.
 
 | | |
 |---|---|
-| Production contracts | 18 |
+| Contracts | six layers + a Bootstrap deployment coordinator (enumerated under [Architecture](#architecture)) |
 | Test suites | 26 |
 | Tests passing | 212 / 212 |
 | EIP-170 | Every contract < 24,576 bytes (`forge build --sizes`) |
@@ -277,10 +277,20 @@ cast send $BOOTSTRAP 'execute(address,bytes)' $DESCRIPTOR $(cast calldata 'lockP
 cast send $BOOTSTRAP finalizeBootstrap
 ```
 
-For testnet (Sepolia, etc.) deployment, Nouns Art isn't available on-chain, so the
-`CopyArtFromNouns` script won't work. Re-encode from Nouns' source PNGs using the
-`nouns-assets` NPM package, or skip art population if you're only testing governance/auction
-flows. Configuration is via env vars; defaults are in `script/Deploy.s.sol`.
+For testnet (Sepolia, etc.) deployment, Nouns Art isn't available on-chain, so `CopyArtFromNouns`
+won't work — but **art cannot be skipped if you intend to `finalizeBootstrap`**. Finalize unpauses
+the auction, which mints the genesis Shwoun(s), and the seeder computes each trait as
+`pseudorandom % traitCount`; with zero trait counts that's a division-by-zero revert (see
+`ShwounsSeeder.sol`). So on testnet either:
+- **Re-encode real art** from Nouns' source PNGs (the `nouns-assets` NPM package) and load it through
+  `bootstrap.executeBatch`, then finalize; or
+- **Load placeholder art** — at least one background/body/accessory/head (the explicit `imageCount`
+  arg drives the count, so trivial bytes suffice) + `lockParts`, exactly as `RehearseDeploy.s.sol` /
+  `rehearse-deploy.sh` do, then finalize.
+
+Skipping art entirely is fine **only** for pre-finalize inspection (deploy + wiring); you cannot
+reach the auction/governance flows without a finalized, unpaused system, which requires mintable art.
+Configuration is via env vars; defaults are in `script/Deploy.s.sol`.
 
 ## What we built on
 

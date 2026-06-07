@@ -24,7 +24,7 @@ Tokenbound's ERC-6551 stack.
   art bytes are reused from Nouns' deployed `NounsArt` via SSTORE2 pointer sharing —
   cheap (~$50 in gas), CC0-clean.
 
-## Architecture (18 production contracts)
+## Architecture (by layer)
 
 ```
 Token layer:        ShwounsToken, ShwounsSeeder, ShwounsDescriptor, ShwounsArt,
