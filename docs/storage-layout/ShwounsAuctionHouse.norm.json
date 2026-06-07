@@ -1,0 +1,288 @@
+{
+  "storage": [
+    {
+      "label": "_initialized",
+      "offset": 0,
+      "slot": "0",
+      "type": "t_uint8"
+    },
+    {
+      "label": "_initializing",
+      "offset": 1,
+      "slot": "0",
+      "type": "t_bool"
+    },
+    {
+      "label": "__gap",
+      "offset": 0,
+      "slot": "1",
+      "type": "t_array(t_uint256)50_storage"
+    },
+    {
+      "label": "_paused",
+      "offset": 0,
+      "slot": "51",
+      "type": "t_bool"
+    },
+    {
+      "label": "__gap",
+      "offset": 0,
+      "slot": "52",
+      "type": "t_array(t_uint256)49_storage"
+    },
+    {
+      "label": "_status",
+      "offset": 0,
+      "slot": "101",
+      "type": "t_uint256"
+    },
+    {
+      "label": "__gap",
+      "offset": 0,
+      "slot": "102",
+      "type": "t_array(t_uint256)49_storage"
+    },
+    {
+      "label": "_owner",
+      "offset": 0,
+      "slot": "151",
+      "type": "t_address"
+    },
+    {
+      "label": "__gap",
+      "offset": 0,
+      "slot": "152",
+      "type": "t_array(t_uint256)49_storage"
+    },
+    {
+      "label": "__gap",
+      "offset": 0,
+      "slot": "201",
+      "type": "t_array(t_uint256)50_storage"
+    },
+    {
+      "label": "__gap",
+      "offset": 0,
+      "slot": "251",
+      "type": "t_array(t_uint256)50_storage"
+    },
+    {
+      "label": "reservePrice",
+      "offset": 0,
+      "slot": "301",
+      "type": "t_uint192"
+    },
+    {
+      "label": "timeBuffer",
+      "offset": 24,
+      "slot": "301",
+      "type": "t_uint56"
+    },
+    {
+      "label": "minBidIncrementPercentage",
+      "offset": 31,
+      "slot": "301",
+      "type": "t_uint8"
+    },
+    {
+      "label": "auctionStorage",
+      "offset": 0,
+      "slot": "302",
+      "type": "t_struct(AuctionV2)_storage"
+    },
+    {
+      "label": "settlementHistory",
+      "offset": 0,
+      "slot": "304",
+      "type": "t_mapping(t_uint256,t_struct(SettlementState)_storage)"
+    },
+    {
+      "label": "sanctionsOracle",
+      "offset": 0,
+      "slot": "305",
+      "type": "t_contract(IChainalysisSanctionsList)"
+    },
+    {
+      "label": "governanceRewards",
+      "offset": 0,
+      "slot": "306",
+      "type": "t_address"
+    },
+    {
+      "label": "governanceRewardsLocked",
+      "offset": 20,
+      "slot": "306",
+      "type": "t_bool"
+    },
+    {
+      "label": "vaultRegistry",
+      "offset": 0,
+      "slot": "307",
+      "type": "t_contract(IShwounsVaultRegistry)"
+    },
+    {
+      "label": "vaultRegistryLocked",
+      "offset": 20,
+      "slot": "307",
+      "type": "t_bool"
+    }
+  ],
+  "types": {
+    "t_address": {
+      "encoding": "inplace",
+      "numberOfBytes": "20"
+    },
+    "t_address_payable": {
+      "encoding": "inplace",
+      "numberOfBytes": "20"
+    },
+    "t_array(t_uint256)49_storage": {
+      "base": "t_uint256",
+      "encoding": "inplace",
+      "numberOfBytes": "1568"
+    },
+    "t_array(t_uint256)50_storage": {
+      "base": "t_uint256",
+      "encoding": "inplace",
+      "numberOfBytes": "1600"
+    },
+    "t_bool": {
+      "encoding": "inplace",
+      "numberOfBytes": "1"
+    },
+    "t_contract(IChainalysisSanctionsList)": {
+      "encoding": "inplace",
+      "numberOfBytes": "20"
+    },
+    "t_contract(IShwounsVaultRegistry)": {
+      "encoding": "inplace",
+      "numberOfBytes": "20"
+    },
+    "t_mapping(t_uint256,t_struct(SettlementState)_storage)": {
+      "encoding": "mapping",
+      "key": "t_uint256",
+      "numberOfBytes": "32",
+      "value": "t_struct(SettlementState)_storage"
+    },
+    "t_struct(AuctionV2)_storage": {
+      "encoding": "inplace",
+      "members": [
+        {
+          "label": "shwounId",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint96"
+        },
+        {
+          "label": "clientId",
+          "offset": 12,
+          "slot": "0",
+          "type": "t_uint32"
+        },
+        {
+          "label": "amount",
+          "offset": 16,
+          "slot": "0",
+          "type": "t_uint128"
+        },
+        {
+          "label": "startTime",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_uint40"
+        },
+        {
+          "label": "endTime",
+          "offset": 5,
+          "slot": "1",
+          "type": "t_uint40"
+        },
+        {
+          "label": "bidder",
+          "offset": 10,
+          "slot": "1",
+          "type": "t_address_payable"
+        },
+        {
+          "label": "settled",
+          "offset": 30,
+          "slot": "1",
+          "type": "t_bool"
+        }
+      ],
+      "numberOfBytes": "64"
+    },
+    "t_struct(SettlementState)_storage": {
+      "encoding": "inplace",
+      "members": [
+        {
+          "label": "blockTimestamp",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint32"
+        },
+        {
+          "label": "amount",
+          "offset": 4,
+          "slot": "0",
+          "type": "t_uint64"
+        },
+        {
+          "label": "winner",
+          "offset": 12,
+          "slot": "0",
+          "type": "t_address"
+        },
+        {
+          "label": "slotWarmedUp",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_uint8"
+        },
+        {
+          "label": "clientId",
+          "offset": 1,
+          "slot": "1",
+          "type": "t_uint32"
+        }
+      ],
+      "numberOfBytes": "64"
+    },
+    "t_uint128": {
+      "encoding": "inplace",
+      "numberOfBytes": "16"
+    },
+    "t_uint192": {
+      "encoding": "inplace",
+      "numberOfBytes": "24"
+    },
+    "t_uint256": {
+      "encoding": "inplace",
+      "numberOfBytes": "32"
+    },
+    "t_uint32": {
+      "encoding": "inplace",
+      "numberOfBytes": "4"
+    },
+    "t_uint40": {
+      "encoding": "inplace",
+      "numberOfBytes": "5"
+    },
+    "t_uint56": {
+      "encoding": "inplace",
+      "numberOfBytes": "7"
+    },
+    "t_uint64": {
+      "encoding": "inplace",
+      "numberOfBytes": "8"
+    },
+    "t_uint8": {
+      "encoding": "inplace",
+      "numberOfBytes": "1"
+    },
+    "t_uint96": {
+      "encoding": "inplace",
+      "numberOfBytes": "12"
+    }
+  }
+}

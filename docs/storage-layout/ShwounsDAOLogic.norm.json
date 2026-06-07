@@ -1,0 +1,673 @@
+{
+  "storage": [
+    {
+      "label": "ds",
+      "offset": 0,
+      "slot": "0",
+      "type": "t_struct(Storage)_storage"
+    },
+    {
+      "label": "_initialized",
+      "offset": 0,
+      "slot": "69",
+      "type": "t_uint8"
+    },
+    {
+      "label": "_initializing",
+      "offset": 1,
+      "slot": "69",
+      "type": "t_bool"
+    },
+    {
+      "label": "__gap",
+      "offset": 0,
+      "slot": "70",
+      "type": "t_array(t_uint256)50_storage"
+    },
+    {
+      "label": "__gap",
+      "offset": 0,
+      "slot": "120",
+      "type": "t_array(t_uint256)50_storage"
+    },
+    {
+      "label": "governanceRewards",
+      "offset": 0,
+      "slot": "170",
+      "type": "t_contract(IGovernanceRewardsForDAO)"
+    },
+    {
+      "label": "governanceRewardsLocked",
+      "offset": 20,
+      "slot": "170",
+      "type": "t_bool"
+    }
+  ],
+  "types": {
+    "t_address": {
+      "encoding": "inplace",
+      "numberOfBytes": "20"
+    },
+    "t_array(t_address)dyn_storage": {
+      "base": "t_address",
+      "encoding": "dynamic_array",
+      "numberOfBytes": "32"
+    },
+    "t_array(t_bytes_storage)dyn_storage": {
+      "base": "t_bytes_storage",
+      "encoding": "dynamic_array",
+      "numberOfBytes": "32"
+    },
+    "t_array(t_string_storage)dyn_storage": {
+      "base": "t_string_storage",
+      "encoding": "dynamic_array",
+      "numberOfBytes": "32"
+    },
+    "t_array(t_struct(DynamicQuorumParamsCheckpoint)_storage)dyn_storage": {
+      "base": "t_struct(DynamicQuorumParamsCheckpoint)_storage",
+      "encoding": "dynamic_array",
+      "numberOfBytes": "32"
+    },
+    "t_array(t_uint256)46_storage": {
+      "base": "t_uint256",
+      "encoding": "inplace",
+      "numberOfBytes": "1472"
+    },
+    "t_array(t_uint256)50_storage": {
+      "base": "t_uint256",
+      "encoding": "inplace",
+      "numberOfBytes": "1600"
+    },
+    "t_array(t_uint256)dyn_storage": {
+      "base": "t_uint256",
+      "encoding": "dynamic_array",
+      "numberOfBytes": "32"
+    },
+    "t_bool": {
+      "encoding": "inplace",
+      "numberOfBytes": "1"
+    },
+    "t_bytes32": {
+      "encoding": "inplace",
+      "numberOfBytes": "32"
+    },
+    "t_bytes_storage": {
+      "encoding": "bytes",
+      "numberOfBytes": "32"
+    },
+    "t_contract(IGovernanceRewardsForDAO)": {
+      "encoding": "inplace",
+      "numberOfBytes": "20"
+    },
+    "t_contract(IShwounsTokenLike)": {
+      "encoding": "inplace",
+      "numberOfBytes": "20"
+    },
+    "t_contract(IShwounsVaultRegistry)": {
+      "encoding": "inplace",
+      "numberOfBytes": "20"
+    },
+    "t_mapping(t_address,t_bool)": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "numberOfBytes": "32",
+      "value": "t_bool"
+    },
+    "t_mapping(t_address,t_mapping(t_bytes32,t_bool))": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "numberOfBytes": "32",
+      "value": "t_mapping(t_bytes32,t_bool)"
+    },
+    "t_mapping(t_address,t_struct(Receipt)_storage)": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "numberOfBytes": "32",
+      "value": "t_struct(Receipt)_storage"
+    },
+    "t_mapping(t_address,t_uint256)": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "numberOfBytes": "32",
+      "value": "t_uint256"
+    },
+    "t_mapping(t_bytes32,t_bool)": {
+      "encoding": "mapping",
+      "key": "t_bytes32",
+      "numberOfBytes": "32",
+      "value": "t_bool"
+    },
+    "t_mapping(t_uint256,t_bool)": {
+      "encoding": "mapping",
+      "key": "t_uint256",
+      "numberOfBytes": "32",
+      "value": "t_bool"
+    },
+    "t_mapping(t_uint256,t_mapping(t_address,t_uint256))": {
+      "encoding": "mapping",
+      "key": "t_uint256",
+      "numberOfBytes": "32",
+      "value": "t_mapping(t_address,t_uint256)"
+    },
+    "t_mapping(t_uint256,t_struct(Proposal)_storage)": {
+      "encoding": "mapping",
+      "key": "t_uint256",
+      "numberOfBytes": "32",
+      "value": "t_struct(Proposal)_storage"
+    },
+    "t_mapping(t_uint256,t_struct(SnapshotState)_storage)": {
+      "encoding": "mapping",
+      "key": "t_uint256",
+      "numberOfBytes": "32",
+      "value": "t_struct(SnapshotState)_storage"
+    },
+    "t_string_storage": {
+      "encoding": "bytes",
+      "numberOfBytes": "32"
+    },
+    "t_struct(DynamicQuorumParams)_storage": {
+      "encoding": "inplace",
+      "members": [
+        {
+          "label": "minQuorumVotesBPS",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint16"
+        },
+        {
+          "label": "maxQuorumVotesBPS",
+          "offset": 2,
+          "slot": "0",
+          "type": "t_uint16"
+        },
+        {
+          "label": "quorumCoefficient",
+          "offset": 4,
+          "slot": "0",
+          "type": "t_uint32"
+        }
+      ],
+      "numberOfBytes": "32"
+    },
+    "t_struct(DynamicQuorumParamsCheckpoint)_storage": {
+      "encoding": "inplace",
+      "members": [
+        {
+          "label": "fromBlock",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint32"
+        },
+        {
+          "label": "params",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_struct(DynamicQuorumParams)_storage"
+        }
+      ],
+      "numberOfBytes": "64"
+    },
+    "t_struct(Proposal)_storage": {
+      "encoding": "inplace",
+      "members": [
+        {
+          "label": "id",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint256"
+        },
+        {
+          "label": "proposer",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_address"
+        },
+        {
+          "label": "proposalThreshold",
+          "offset": 0,
+          "slot": "2",
+          "type": "t_uint256"
+        },
+        {
+          "label": "quorumVotes",
+          "offset": 0,
+          "slot": "3",
+          "type": "t_uint256"
+        },
+        {
+          "label": "targets",
+          "offset": 0,
+          "slot": "4",
+          "type": "t_array(t_address)dyn_storage"
+        },
+        {
+          "label": "values",
+          "offset": 0,
+          "slot": "5",
+          "type": "t_array(t_uint256)dyn_storage"
+        },
+        {
+          "label": "signatures",
+          "offset": 0,
+          "slot": "6",
+          "type": "t_array(t_string_storage)dyn_storage"
+        },
+        {
+          "label": "calldatas",
+          "offset": 0,
+          "slot": "7",
+          "type": "t_array(t_bytes_storage)dyn_storage"
+        },
+        {
+          "label": "startBlock",
+          "offset": 0,
+          "slot": "8",
+          "type": "t_uint256"
+        },
+        {
+          "label": "endBlock",
+          "offset": 0,
+          "slot": "9",
+          "type": "t_uint256"
+        },
+        {
+          "label": "forVotes",
+          "offset": 0,
+          "slot": "10",
+          "type": "t_uint256"
+        },
+        {
+          "label": "againstVotes",
+          "offset": 0,
+          "slot": "11",
+          "type": "t_uint256"
+        },
+        {
+          "label": "abstainVotes",
+          "offset": 0,
+          "slot": "12",
+          "type": "t_uint256"
+        },
+        {
+          "label": "canceled",
+          "offset": 0,
+          "slot": "13",
+          "type": "t_bool"
+        },
+        {
+          "label": "vetoed",
+          "offset": 1,
+          "slot": "13",
+          "type": "t_bool"
+        },
+        {
+          "label": "executed",
+          "offset": 2,
+          "slot": "13",
+          "type": "t_bool"
+        },
+        {
+          "label": "receipts",
+          "offset": 0,
+          "slot": "14",
+          "type": "t_mapping(t_address,t_struct(Receipt)_storage)"
+        },
+        {
+          "label": "totalSupply",
+          "offset": 0,
+          "slot": "15",
+          "type": "t_uint256"
+        },
+        {
+          "label": "creationBlock",
+          "offset": 0,
+          "slot": "16",
+          "type": "t_uint256"
+        },
+        {
+          "label": "objectionPeriodEndBlock",
+          "offset": 0,
+          "slot": "17",
+          "type": "t_uint64"
+        },
+        {
+          "label": "signers",
+          "offset": 0,
+          "slot": "18",
+          "type": "t_array(t_address)dyn_storage"
+        },
+        {
+          "label": "updatePeriodEndBlock",
+          "offset": 0,
+          "slot": "19",
+          "type": "t_uint256"
+        }
+      ],
+      "numberOfBytes": "640"
+    },
+    "t_struct(Receipt)_storage": {
+      "encoding": "inplace",
+      "members": [
+        {
+          "label": "hasVoted",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_bool"
+        },
+        {
+          "label": "support",
+          "offset": 1,
+          "slot": "0",
+          "type": "t_uint8"
+        },
+        {
+          "label": "votes",
+          "offset": 2,
+          "slot": "0",
+          "type": "t_uint96"
+        }
+      ],
+      "numberOfBytes": "32"
+    },
+    "t_struct(SnapshotState)_storage": {
+      "encoding": "inplace",
+      "members": [
+        {
+          "label": "snapshotTargetCount",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint256"
+        },
+        {
+          "label": "snapshotProgress",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_uint256"
+        },
+        {
+          "label": "collectProgress",
+          "offset": 0,
+          "slot": "2",
+          "type": "t_uint256"
+        },
+        {
+          "label": "snapshottedVaults",
+          "offset": 0,
+          "slot": "3",
+          "type": "t_array(t_uint256)dyn_storage"
+        },
+        {
+          "label": "assets",
+          "offset": 0,
+          "slot": "4",
+          "type": "t_array(t_address)dyn_storage"
+        },
+        {
+          "label": "requestedAmount",
+          "offset": 0,
+          "slot": "5",
+          "type": "t_mapping(t_address,t_uint256)"
+        },
+        {
+          "label": "totalSnapshotBalance",
+          "offset": 0,
+          "slot": "6",
+          "type": "t_mapping(t_address,t_uint256)"
+        },
+        {
+          "label": "vaultSnapshot",
+          "offset": 0,
+          "slot": "7",
+          "type": "t_mapping(t_uint256,t_mapping(t_address,t_uint256))"
+        },
+        {
+          "label": "vaultCollected",
+          "offset": 0,
+          "slot": "8",
+          "type": "t_mapping(t_uint256,t_bool)"
+        },
+        {
+          "label": "finalized",
+          "offset": 0,
+          "slot": "9",
+          "type": "t_bool"
+        },
+        {
+          "label": "frozenVaultIds",
+          "offset": 0,
+          "slot": "10",
+          "type": "t_array(t_uint256)dyn_storage"
+        },
+        {
+          "label": "collected",
+          "offset": 0,
+          "slot": "11",
+          "type": "t_mapping(t_address,t_uint256)"
+        },
+        {
+          "label": "queued",
+          "offset": 0,
+          "slot": "12",
+          "type": "t_bool"
+        },
+        {
+          "label": "freezeProgress",
+          "offset": 0,
+          "slot": "13",
+          "type": "t_uint256"
+        },
+        {
+          "label": "pulled",
+          "offset": 0,
+          "slot": "14",
+          "type": "t_mapping(t_uint256,t_mapping(t_address,t_uint256))"
+        },
+        {
+          "label": "refundStarted",
+          "offset": 0,
+          "slot": "15",
+          "type": "t_bool"
+        },
+        {
+          "label": "refundProgress",
+          "offset": 0,
+          "slot": "16",
+          "type": "t_uint256"
+        },
+        {
+          "label": "refunded",
+          "offset": 0,
+          "slot": "17",
+          "type": "t_bool"
+        }
+      ],
+      "numberOfBytes": "576"
+    },
+    "t_struct(Storage)_storage": {
+      "encoding": "inplace",
+      "members": [
+        {
+          "label": "admin",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_address"
+        },
+        {
+          "label": "pendingAdmin",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_address"
+        },
+        {
+          "label": "vetoer",
+          "offset": 0,
+          "slot": "2",
+          "type": "t_address"
+        },
+        {
+          "label": "pendingVetoer",
+          "offset": 0,
+          "slot": "3",
+          "type": "t_address"
+        },
+        {
+          "label": "votingDelay",
+          "offset": 0,
+          "slot": "4",
+          "type": "t_uint256"
+        },
+        {
+          "label": "votingPeriod",
+          "offset": 0,
+          "slot": "5",
+          "type": "t_uint256"
+        },
+        {
+          "label": "proposalThresholdBPS",
+          "offset": 0,
+          "slot": "6",
+          "type": "t_uint256"
+        },
+        {
+          "label": "quorumVotesBPS",
+          "offset": 0,
+          "slot": "7",
+          "type": "t_uint256"
+        },
+        {
+          "label": "lastMinuteWindowInBlocks",
+          "offset": 0,
+          "slot": "8",
+          "type": "t_uint32"
+        },
+        {
+          "label": "objectionPeriodDurationInBlocks",
+          "offset": 4,
+          "slot": "8",
+          "type": "t_uint32"
+        },
+        {
+          "label": "proposalCount",
+          "offset": 0,
+          "slot": "9",
+          "type": "t_uint256"
+        },
+        {
+          "label": "shwouns",
+          "offset": 0,
+          "slot": "10",
+          "type": "t_contract(IShwounsTokenLike)"
+        },
+        {
+          "label": "vaultRegistry",
+          "offset": 0,
+          "slot": "11",
+          "type": "t_contract(IShwounsVaultRegistry)"
+        },
+        {
+          "label": "_proposals",
+          "offset": 0,
+          "slot": "12",
+          "type": "t_mapping(t_uint256,t_struct(Proposal)_storage)"
+        },
+        {
+          "label": "latestProposalIds",
+          "offset": 0,
+          "slot": "13",
+          "type": "t_mapping(t_address,t_uint256)"
+        },
+        {
+          "label": "_snapshotState",
+          "offset": 0,
+          "slot": "14",
+          "type": "t_mapping(t_uint256,t_struct(SnapshotState)_storage)"
+        },
+        {
+          "label": "quorumParamsCheckpoints",
+          "offset": 0,
+          "slot": "15",
+          "type": "t_array(t_struct(DynamicQuorumParamsCheckpoint)_storage)dyn_storage"
+        },
+        {
+          "label": "cancelledSigs",
+          "offset": 0,
+          "slot": "16",
+          "type": "t_mapping(t_address,t_mapping(t_bytes32,t_bool))"
+        },
+        {
+          "label": "proposalUpdatablePeriodInBlocks",
+          "offset": 0,
+          "slot": "17",
+          "type": "t_uint256"
+        },
+        {
+          "label": "proposalQueuePeriodInBlocks",
+          "offset": 0,
+          "slot": "18",
+          "type": "t_uint256"
+        },
+        {
+          "label": "executing",
+          "offset": 0,
+          "slot": "19",
+          "type": "t_bool"
+        },
+        {
+          "label": "activeProposalId",
+          "offset": 0,
+          "slot": "20",
+          "type": "t_uint256"
+        },
+        {
+          "label": "proposalEscrowImplementation",
+          "offset": 0,
+          "slot": "21",
+          "type": "t_address"
+        },
+        {
+          "label": "proposalEscrowImplementationLocked",
+          "offset": 20,
+          "slot": "21",
+          "type": "t_bool"
+        },
+        {
+          "label": "fundableAsset",
+          "offset": 0,
+          "slot": "22",
+          "type": "t_mapping(t_address,t_bool)"
+        },
+        {
+          "label": "__gap",
+          "offset": 0,
+          "slot": "23",
+          "type": "t_array(t_uint256)46_storage"
+        }
+      ],
+      "numberOfBytes": "2208"
+    },
+    "t_uint16": {
+      "encoding": "inplace",
+      "numberOfBytes": "2"
+    },
+    "t_uint256": {
+      "encoding": "inplace",
+      "numberOfBytes": "32"
+    },
+    "t_uint32": {
+      "encoding": "inplace",
+      "numberOfBytes": "4"
+    },
+    "t_uint64": {
+      "encoding": "inplace",
+      "numberOfBytes": "8"
+    },
+    "t_uint8": {
+      "encoding": "inplace",
+      "numberOfBytes": "1"
+    },
+    "t_uint96": {
+      "encoding": "inplace",
+      "numberOfBytes": "12"
+    }
+  }
+}
