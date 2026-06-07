@@ -130,7 +130,9 @@ declarations; visual scanning isn't a gate). Define coverage as:
 **Reproducible check (build it as part of this work): `script/check-natspec.py`.** Do NOT diff the flat
 ABI — an ABI flattens inherited functions and synthesizes public-variable getters, so it would demand
 NatSpec on members the contract doesn't declare. Drive the check off the **compiler AST + source
-locations** instead (`forge build` with `extra_output = ["ast"]`, or `solc --ast-compact-json`):
+locations** instead (`forge build` with `ast = true` in `[profile.default]` — note: `extra_output =
+["ast"]` is rejected by Foundry 1.7.1, since `ast` is a source-level output, not a per-contract output
+selection — or `solc --ast-compact-json`):
 - **Attribute by declaration site:** for each in-scope contract, enumerate only the
   `FunctionDefinition` / `EventDefinition` / `ErrorDefinition` / public `VariableDeclaration` nodes
   **declared in that contract's own source** (the node's `src` falls in the in-scope file). This
