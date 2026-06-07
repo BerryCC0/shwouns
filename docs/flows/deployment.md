@@ -41,7 +41,7 @@ sequenceDiagram
     BS->>Sys: unpause auction (kicks off auction #1)
     BS->>Sys: transferOwnership(dao) for every Ownable
     BS->>DAO: setAdminToDAO()
-    BS->>BS: assert handoff complete; finalized = true (permanent)
+    BS->>BS: assert handoff complete, finalized = true (permanent)
 ```
 
 **Why finalize is a separate step from deploy:** `finalizeBootstrap` unpauses the auction, which

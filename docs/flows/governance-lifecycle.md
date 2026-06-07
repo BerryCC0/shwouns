@@ -29,7 +29,7 @@ sequenceDiagram
     Note over DAO: last-minute For-flip → ObjectionPeriod<br/>(Against-only) if quorum+majority met
 
     Caller->>DAO: queue(id)
-    Note over DAO,Escrow: derive requested assets from calldata;<br/>deploy escrow (CREATE2 salt=id); freeze active-vault SET
+    Note over DAO,Escrow: derive requested assets from calldata<br/>deploy escrow (CREATE2 salt=id)<br/>freeze active-vault SET
     opt active set > 256
         Caller->>DAO: freezeVaults(id, batchSize)
     end
@@ -47,7 +47,7 @@ sequenceDiagram
     Note over DAO: set execution lock + activeProposalId (→ Executing)
     DAO->>Escrow: execute(targets,values,calldatas)
     Escrow->>Targets: call{value}(data) for each action
-    Note over DAO: clear lock; set terminal Executed
+    Note over DAO: clear lock, set terminal Executed
     DAO->>GR: allocateProposalReward(id)  [auto, in finalize]
     Voter->>GR: claimVotingReward(id, giTokenId)
     GR-->>Voter: pro-rata share (For/Against + approved GI NFT)

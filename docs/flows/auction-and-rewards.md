@@ -23,7 +23,7 @@ sequenceDiagram
 
     Note over AH: auction live for Shwoun N
     Bidder->>AH: createBid(N) [or createBid(N, clientId)]  payable
-    Note over AH: must beat last bid by minBidIncrementPercentage;<br/>late bid extends endTime by timeBuffer
+    Note over AH: must beat last bid by minBidIncrementPercentage<br/>late bid extends endTime by timeBuffer
     AH-->>Bidder: refund prior top bidder (WETH fallback)
     Settler->>AH: settleCurrentAndCreateNewAuction()
     alt had a winning bid
@@ -80,11 +80,11 @@ sequenceDiagram
     DAO->>AR: approve(giTokenId)  (or approveMany)
     Note over D: a proposal finalizes → D.finalize auto-calls:
     D->>GR: allocateProposalReward(proposalId)
-    Note over GR: reserve proposalRewardAmount from unreserved balance;<br/>set 180-day deadline
+    Note over GR: reserve proposalRewardAmount from unreserved balance<br/>set 180-day deadline
     Voter->>GR: claimVotingReward(proposalId, giTokenId)
     GR->>AR: isEligible(voter, giTokenId)?
     GR->>D: getReceiptUnpacked + proposalVotes
-    Note over GR: must have voted For/Against (not Abstain);<br/>both voter+tokenId claim flags checked & set (H-03)
+    Note over GR: must have voted For/Against (not Abstain)<br/>both voter+tokenId claim flags checked and set (H-03)
     GR-->>Voter: pro-rata share = pool × yourVotes / (for+against)
 ```
 

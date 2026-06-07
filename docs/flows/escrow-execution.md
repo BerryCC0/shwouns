@@ -78,7 +78,7 @@ sequenceDiagram
 
     Caller->>DAO: finalize(proposalId)
     Note over DAO: require !executing (C-01 lock)<br/>require state == Collected<br/>solvency check vs escrow's real balance
-    DAO->>DAO: executing = true; activeProposalId = id  (→ Executing)
+    DAO->>DAO: executing = true, activeProposalId = id (→ Executing)
     DAO->>Escrow: execute(targets, values, calldatas)
     loop each action
         Escrow->>Target: call{value}(data)
@@ -89,7 +89,7 @@ sequenceDiagram
         end
     end
     Note over DAO: (escrow bubbles any revert → whole attempt rolls back, finalize stays retryable)
-    DAO->>DAO: executing = false; activeProposalId = 0; executed = true (terminal LAST)
+    DAO->>DAO: executing = false, activeProposalId = 0, executed = true (terminal LAST)
 ```
 
 The ordering is **CEI with the lock as the effect**: the execution lock + `activeProposalId` are set
