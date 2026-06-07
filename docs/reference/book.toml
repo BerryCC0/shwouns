@@ -1,0 +1,13 @@
+[book]
+src = "src"
+title = "Shwouns Contract Reference"
+
+[output.html]
+no-section-label = true
+additional-js = ["solidity.min.js"]
+additional-css = ["book.css"]
+mathjax-support = true
+git-repository-url = "https://github.com/BerryCC0/shwouns"
+
+[output.html.fold]
+enable = true
